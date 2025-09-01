@@ -1,0 +1,5 @@
+{
+    "app": "uv run python3 app.py",
+    "versionReporting": false,
+    "context": {}
+}
