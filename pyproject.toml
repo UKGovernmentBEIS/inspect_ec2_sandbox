@@ -1,76 +1,51 @@
-[project]
-name = "inspect-ec2-sandbox"
+[tool.poetry]
+name = "inspect-k8s-sandbox"
 version = "0.1.0"
-description = "An EC2 Sandbox Environment for Inspect"
+description = "A Kubernetes Sandbox Environment for Inspect"
+authors = ["UK AI Safety Institute"]
 readme = "README.md"
-authors = [
-    {name = "UK AI Security Institute"}
-]
-requires-python = ">=3.10"
-dependencies = [
-    "tenacity>=9.0.0",
-    "httpx>=0.28.1",
-    "pydantic>=2.10.6",
-    "pydantic-extra-types>=2.10.2",
-    "inspect_ai>=0.3.79",
-    "rich>=13.9",
-    "platformdirs>=4.3.7",
-    "boto3>=1.35.0",
-    "websocket-client>=1.8.0",
-    "pydantic-settings>=2.10.1",
+packages = [
+  {include = "k8s_sandbox", from = "src"},
 ]
 
-[project.entry-points."inspect_ai"]
-"ec2-sandbox" = "ec2sandbox._ec2_sandbox_environment"
+[tool.poetry.dependencies]
+python = "^3.10"
+inspect-ai = ">=0.3.50"
+kubernetes = "^31.0.0"
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-pythonpath = ["tests"]
-testpaths = ["tests/**/*.py"]
+[tool.poetry.group.dev.dependencies]
+mypy = "^1.9.0"
+pre-commit = "^3.6.2"
+pytest = "^8.1.1"
+pytest-asyncio = "^0.23.7"
+pytest-repeat = "^0.9.3"
+ruff = "^0.6.0"
+types-pyyaml = "^6.0.12"
+
+[tool.poetry.plugins.inspect_ai]
+k8s-sandbox = "k8s_sandbox._sandbox_environment"
+
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/ec2sandbox"]
-
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[tool.ruff]
-target-version = "py310"
 
 [tool.ruff.lint]
-select = [
-  "E",   # pycodestyle errors
-  "W",   # pycodestyle warnings
-  "F",   # flake8
-  "D",   # pydocstyle
-  "I",   # isort
-]
-ignore = [
-  "D212",  # multi-line-summary-first-line
-]
-
-[tool.ruff.lint.per-file-ignores]
-# Rationale: public objects in the tests and experimental dirs don't form part of the 
-# package so drop the requirement for docstrings.
-"tests/*" = ["D10"]  # undocumented-(public|magic)-*
-"src/ec2sandbox/experimental/*" = ["D10"]  # undocumented-(public|magic)-*
+select = ["E",   # pycodestyle errors
+          "W",   # pycodestyle warnings
+          "F",   # flake8
+          "D",   # pydocstyle
+          "I",   # isort
+        ]
+ignore = ["E203", "D10", "D203", "D212"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
-[tool.mypy]
-python_version = "3.10"
-plugins = "pydantic.mypy"
-packages = ["ec2sandbox", "tests.ec2sandboxtest"]
 
-[dependency-groups]
-dev = [
-    "mypy>=1.14.1",
-    "pytest>=8.3.4",
-    "pytest-asyncio>=0.25.3",
-    "ruff>=0.9.3",
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "req_k8s: marks tests as requiring a test Kubernetes cluster (deselect with '-m \"not req_k8s\"')"
 ]
