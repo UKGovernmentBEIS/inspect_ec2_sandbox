@@ -1,11 +1,11 @@
 [tool.poetry]
-name = "inspect-k8s-sandbox"
+name = "inspect-ec2-sandbox"
 version = "0.1.0"
-description = "A Kubernetes Sandbox Environment for Inspect"
+description = "An EC2 Sandbox Environment for Inspect"
 authors = ["UK AI Safety Institute"]
 readme = "README.md"
 packages = [
-  {include = "k8s_sandbox", from = "src"},
+  {include = "ec2_sandbox", from = "src"},
 ]
 
 [tool.poetry.dependencies]
@@ -23,7 +23,7 @@ ruff = "^0.6.0"
 types-pyyaml = "^6.0.12"
 
 [tool.poetry.plugins.inspect_ai]
-k8s-sandbox = "k8s_sandbox._sandbox_environment"
+ec2-sandbox = "ec2_sandbox._sandbox_environment"
 
 
 [build-system]
@@ -47,5 +47,5 @@ convention = "google"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [
-    "req_k8s: marks tests as requiring a test Kubernetes cluster (deselect with '-m \"not req_k8s\"')"
+    "req_ec2: marks tests as requiring a test Kubernetes cluster (deselect with '-m \"not req_ec2\"')"
 ]
