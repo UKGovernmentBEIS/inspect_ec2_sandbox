@@ -14,6 +14,7 @@ from botocore.exceptions import ClientError, WaiterError
 from inspect_ai.util import (
     ExecResult,
     OutputLimitExceededError,
+    SandboxConnection,
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
     SandboxEnvironmentLimits,
@@ -558,6 +559,14 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
                 )
             else:
                 raise IOError(f"Failed to write file {file}: {result.stderr}")
+
+    async def connection(self, *, user: str | None = None) -> SandboxConnection:
+        return SandboxConnection(
+            type="ec2",
+            command=f"aws ssm start-session --target {self.instance_id} "
+            "--document-name AWS-StartInteractiveCommand "
+            '--parameters command="bash -l"',
+        )
 
     def _s3_key_prefix(
         self, operation: Literal["read_file", "write_file", "exec"]
