@@ -137,7 +137,9 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         if not interrupted:
             for env in environments.values():
                 if isinstance(env, Ec2SandboxEnvironment):
-                    env.ec2_client.terminate_instances(InstanceIds=[env.instance_id])
+                    env.ec2_client.terminate_instances(
+                        InstanceIds=[env.instance_id], SkipOsShutdown=True, Force=True
+                    )
         return None
 
     @classmethod
@@ -246,7 +248,9 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
                 instance_ids = []
                 for instance in instances:
                     instance_ids.append(instance["InstanceId"])
-                ec2.terminate_instances(InstanceIds=list(instance_ids))
+                ec2.terminate_instances(
+                    InstanceIds=list(instance_ids), SkipOsShutdown=True, Force=True
+                )
 
             else:
                 print("\nNo EC2 sandbox instances found to clean up.\n")
@@ -428,9 +432,12 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             shlex.join(["test", "-d", file]) + "&& echo 'Is a directory' 1>&2 && exit 1"
         )
 
+        # for debugging purposes it might be helpful to add
+        # "--fail-with-body"
+        # here, but older versions of curl might not have it
         cmd = [
             "curl",
-            "--fail-with-body",
+            "--fail",
             "--verbose",
             "--upload-file",
             file,
@@ -524,9 +531,12 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             shlex.join(["test", "-d", file]) + "&& echo 'Is a directory' 1>&2 && exit 1"
         )
 
+        # for debugging purposes it might be helpful to add
+        # "--fail-with-body"
+        # here, but older versions of curl might not have it
         cmd = [
             "curl",
-            "--fail-with-body",
+            "--fail",
             "--verbose",
             "--output",
             file,

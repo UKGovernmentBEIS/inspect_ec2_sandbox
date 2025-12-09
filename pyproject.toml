@@ -1,6 +1,6 @@
 [project]
 name = "inspect-ec2-sandbox"
-version = "0.1.0"
+version = "0.1.1"
 description = "An EC2 Sandbox Environment for Inspect"
 readme = "README.md"
 authors = [

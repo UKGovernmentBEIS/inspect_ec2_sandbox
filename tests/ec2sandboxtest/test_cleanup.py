@@ -1,3 +1,4 @@
+import asyncio
 from typing import Tuple
 
 import boto3
@@ -31,6 +32,8 @@ async def test_cleanup():
         environments=envs,
         interrupted=False,
     )
+
+    await asyncio.sleep(5)
 
     post_cleanup_instance_ids = _read_instance_ids()
 
