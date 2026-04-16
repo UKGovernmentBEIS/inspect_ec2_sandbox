@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, ClassVar, Dict, List, Union
 
 import boto3
 from botocore.exceptions import ClientError, WaiterError
@@ -31,6 +31,7 @@ from ec2sandbox._instance_provider import (
     Ec2InstanceProvider,
     SandboxInstanceInfo,
     get_ec2_instance_provider,
+    get_provider_session,
 )
 from ec2sandbox.schema import Ec2SandboxEnvironmentConfig
 
@@ -38,9 +39,9 @@ from ._unpack_tags import convert_tags_for_aws_interface
 
 
 @retry(stop=stop_after_attempt(20), wait=wait_fixed(30))
-def _wait_for_ssm(instance_id, region):
-    ssm = boto3.client("ssm", region_name=region)
-    resp = ssm.describe_instance_information(
+def _wait_for_ssm(instance_id: str, ssm_client: Any) -> bool:
+    """Wait for SSM agent to come online on the given instance."""
+    resp = ssm_client.describe_instance_information(
         InstanceInformationFilterList=[
             {"key": "InstanceIds", "valueSet": [instance_id]}
         ]
@@ -64,6 +65,23 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
     TRACE_NAME = "ec2_sandbox_environment"
 
+    _session: ClassVar[boto3.Session | None] = None
+
+    @classmethod
+    def set_session(cls, session: boto3.Session) -> None:
+        """Set the boto3 session used for all AWS operations.
+
+        Call this before running any evals to supply explicit credentials.
+        If not called, a default ``boto3.Session()`` is used.
+        """
+        cls._session = session
+
+    @classmethod
+    def _get_session(cls) -> boto3.Session:
+        if cls._session is None:
+            cls._session = boto3.Session()
+        return cls._session
+
     def __init__(
         self,
         instance_id: str,
@@ -75,20 +93,29 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         self.region = region
         self.s3_bucket = s3_bucket
         self.s3_key_prefix = s3_key_prefix
-        self.ssm_client = boto3.client("ssm", region_name=region)
-        self.s3_client = boto3.client(
+        session = self._get_session()
+        self.ssm_client = session.client("ssm", region_name=region)
+        self.s3_client = session.client(
             "s3",
             region_name=region,
             endpoint_url=f"https://s3.{region}.amazonaws.com",
         )
-        self.ec2_client = boto3.client("ec2", region_name=region)
+        self.ec2_client = session.client("ec2", region_name=region)
 
     @classmethod
     @override
     async def task_init(
         cls, task_name: str, config: SandboxEnvironmentConfigType | None
     ) -> None:
-        return None
+        # If a custom provider supplies a session, adopt it before any
+        # samples run so all runtime boto3 calls share the same credentials.
+        provider = get_ec2_instance_provider()
+        provider_session = get_provider_session(provider)
+        if provider_session is not None:
+            cls.set_session(provider_session)
+        else:
+            # Ensure the default session is initialised before any samples run.
+            cls._get_session()
 
     @classmethod
     @override
@@ -147,12 +174,13 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             return {"default": environment}
 
         # Default path — direct EC2/SSM calls using Ec2SandboxEnvironmentConfig.
+        session = cls._get_session()
         if config is None:
-            config = Ec2SandboxEnvironmentConfig.from_settings()
+            config = Ec2SandboxEnvironmentConfig.from_settings(session=session)
         if not isinstance(config, Ec2SandboxEnvironmentConfig):
             raise ValueError("config must be a Ec2SandboxEnvironmentConfig")
 
-        ec2_client = boto3.client("ec2", region_name=config.region)
+        ec2_client = session.client("ec2", region_name=config.region)
 
         tags = list(config.extra_tags) + tags
 
@@ -173,14 +201,14 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         waiter = ec2_client.get_waiter("instance_running")
         waiter.wait(InstanceIds=[instance["InstanceId"]])
 
-        _wait_for_ssm(instance["InstanceId"], config.region)
-
         environment = Ec2SandboxEnvironment(
             instance_id=instance["InstanceId"],
             region=config.region,
             s3_bucket=config.s3_bucket,
             s3_key_prefix=config.s3_key_prefix,
         )
+
+        _wait_for_ssm(environment.instance_id, environment.ssm_client)
 
         return {"default": environment}
 
@@ -299,7 +327,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
     @classmethod
     async def _cli_cleanup_default(cls) -> None:
-        ec2 = boto3.client("ec2")
+        ec2 = cls._get_session().client("ec2")
         response = ec2.describe_instances(
             Filters=[
                 {

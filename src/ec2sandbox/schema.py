@@ -65,8 +65,14 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
     extra_tags: Tuple[Tuple[str, str], ...]
 
     @classmethod
-    def from_settings(cls, **kwargs):
-        """Create an instance from environment settings with optional overrides."""
+    def from_settings(cls, session: "boto3.Session | None" = None, **kwargs):
+        """Create an instance from environment settings with optional overrides.
+
+        Args:
+            session: Optional boto3 session for AWS calls (e.g. AMI lookup).
+                Falls back to ``boto3.Session()`` when not provided.
+            **kwargs: Field-level overrides applied on top of env-var settings.
+        """
         settings = _Ec2ExistingInfraSettings()
 
         params = {
@@ -96,7 +102,7 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
                 )
 
         if params["ami_id"] is None:
-            params["ami_id"] = _find_ami_ubu24(params["region"])
+            params["ami_id"] = _find_ami_ubu24(params["region"], session=session)
 
         if params["instance_type"] is None:
             params["instance_type"] = "t3a.large"
@@ -112,8 +118,11 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
         return cls(**params)
 
 
-def _find_ami_ubu24(region: str) -> str:
-    ssm_client = boto3.client("ssm", region_name=region)
+def _find_ami_ubu24(region: str, session: "boto3.Session | None" = None) -> str:
+    """Look up the current Ubuntu 24.04 AMI via SSM Parameter Store."""
+    if session is None:
+        session = boto3.Session()
+    ssm_client = session.client("ssm", region_name=region)
 
     # see https://documentation.ubuntu.com/aws/aws-how-to/instances/find-ubuntu-images/
     response = ssm_client.get_parameters(

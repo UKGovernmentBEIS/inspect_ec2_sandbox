@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    import boto3
 
 _logger = logging.getLogger(__name__)
 
@@ -109,3 +112,24 @@ def set_ec2_instance_provider(provider: Ec2InstanceProvider) -> None:
 def get_ec2_instance_provider() -> Ec2InstanceProvider | None:
     """Return the registered provider, or ``None`` for the default path."""
     return _provider
+
+
+def get_provider_session(
+    provider: Ec2InstanceProvider | None,
+) -> "boto3.Session | None":
+    """Return a provider-supplied ``boto3.Session`` if one is available.
+
+    Providers may optionally implement a ``get_session()`` method to
+    supply the session used for all runtime AWS operations (SSM, S3,
+    EC2) performed by the sandbox.  The method is called once per task
+    during ``Ec2SandboxEnvironment.task_init``.
+
+    Returns ``None`` if no provider is registered, the provider does not
+    implement ``get_session``, or the provider returns ``None``.
+    """
+    if provider is None:
+        return None
+    get_session = getattr(provider, "get_session", None)
+    if get_session is None:
+        return None
+    return get_session()
