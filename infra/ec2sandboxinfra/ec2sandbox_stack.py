@@ -129,18 +129,32 @@ class Ec2SandboxStack(cdk.Stack):
             ],
         )
 
-        # S3 permissions for file operations
+        # S3 permissions for sandbox instances.  Sandboxes only need PutObject
+        # (SSM agent uploads command stdout/stderr via OutputS3BucketName).
+        # GetObject is not needed — file transfers use presigned URLs generated
+        # by the eval host.  DeleteObject is not needed — the eval host cleans
+        # up.  ListBucket is required because the SSM agent calls HeadBucket
+        # for region discovery (HeadBucket is gated on s3:ListBucket).
+        # GetEncryptionConfiguration is needed because the SSM agent calls
+        # GetBucketEncryption to determine SSE headers before uploading.
         self.instance_role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
-                    "s3:GetObject",
                     "s3:PutObject",
-                    "s3:DeleteObject",
+                ],
+                resources=[
+                    f"{self.bucket.bucket_arn}/*",
+                ],
+            )
+        )
+        self.instance_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
                     "s3:ListBucket",
+                    "s3:GetEncryptionConfiguration",
                 ],
                 resources=[
                     self.bucket.bucket_arn,
-                    f"{self.bucket.bucket_arn}/*",
                 ],
             )
         )

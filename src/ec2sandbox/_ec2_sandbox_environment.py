@@ -27,6 +27,11 @@ from rich.table import Table
 from tenacity import retry, stop_after_attempt, wait_fixed
 from typing_extensions import Literal, override
 
+from ec2sandbox._instance_provider import (
+    Ec2InstanceProvider,
+    SandboxInstanceInfo,
+    get_ec2_instance_provider,
+)
 from ec2sandbox.schema import Ec2SandboxEnvironmentConfig
 
 from ._unpack_tags import convert_tags_for_aws_interface
@@ -57,22 +62,26 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
     logger = getLogger(__name__)
 
-    config: Ec2SandboxEnvironmentConfig
-    s3_client: boto3.client
-    ssm_client: boto3.client
-
     TRACE_NAME = "ec2_sandbox_environment"
 
-    def __init__(self, config: Ec2SandboxEnvironmentConfig, instance_id: str):
-        self.config = config
+    def __init__(
+        self,
+        instance_id: str,
+        region: str,
+        s3_bucket: str,
+        s3_key_prefix: str = "",
+    ):
         self.instance_id = instance_id
-        self.ssm_client = boto3.client("ssm", region_name=config.region)
+        self.region = region
+        self.s3_bucket = s3_bucket
+        self.s3_key_prefix = s3_key_prefix
+        self.ssm_client = boto3.client("ssm", region_name=region)
         self.s3_client = boto3.client(
             "s3",
-            region_name=config.region,
-            endpoint_url=f"https://s3.{config.region}.amazonaws.com",
+            region_name=region,
+            endpoint_url=f"https://s3.{region}.amazonaws.com",
         )
-        self.ec2_client = boto3.client("ec2", region_name=config.region)
+        self.ec2_client = boto3.client("ec2", region_name=region)
 
     @classmethod
     @override
@@ -89,6 +98,55 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         metadata: dict[str, str],
     ) -> dict[str, SandboxEnvironment]:
+        provider = get_ec2_instance_provider()
+
+        # Base tags shared by both the custom-provider and default paths.
+        # Each path prepends config.extra_tags in its own way.
+        tags = [
+            ("Name", f"inspect_ec2_sandbox_{task_name}"),
+            ("inspect_task", task_name),
+            (MARKER_TAG_KEY, "true"),
+        ]
+
+        if provider is not None:
+            # Custom provider path — provider handles all provisioning.
+            instance_type = (
+                config.instance_type
+                if isinstance(config, Ec2SandboxEnvironmentConfig)
+                else "t3a.large"
+            )
+            ami_id = (
+                config.ami_id
+                if isinstance(config, Ec2SandboxEnvironmentConfig)
+                else ""
+            )
+            if isinstance(config, Ec2SandboxEnvironmentConfig) and config.extra_tags:
+                tags = list(config.extra_tags) + tags
+
+            cls.logger.debug(
+                "sample_init: custom provider, type=%s ami=%s",
+                instance_type,
+                ami_id,
+            )
+            result = await provider.create_instance(
+                instance_type=instance_type,
+                ami_id=ami_id,
+                tags=tags,
+            )
+            cls.logger.debug(
+                "sample_init: provider returned id=%s region=%s",
+                result.instance_id,
+                result.region,
+            )
+            environment = Ec2SandboxEnvironment(
+                instance_id=result.instance_id,
+                region=result.region,
+                s3_bucket=result.s3_bucket,
+                s3_key_prefix=result.s3_key_prefix,
+            )
+            return {"default": environment}
+
+        # Default path — direct EC2/SSM calls using Ec2SandboxEnvironmentConfig.
         if config is None:
             config = Ec2SandboxEnvironmentConfig.from_settings()
         if not isinstance(config, Ec2SandboxEnvironmentConfig):
@@ -96,11 +154,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
         ec2_client = boto3.client("ec2", region_name=config.region)
 
-        specified_tags = config.extra_tags
-        tags = list(specified_tags)
-        tags.append(("Name", f"inspect_ec2_sandbox_{task_name}"))
-        tags.append(("inspect_task", task_name))
-        tags.append((MARKER_TAG_KEY, "true"))
+        tags = list(config.extra_tags) + tags
 
         instance_params = {
             "ImageId": config.ami_id,
@@ -119,9 +173,14 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         waiter = ec2_client.get_waiter("instance_running")
         waiter.wait(InstanceIds=[instance["InstanceId"]])
 
-        environment = Ec2SandboxEnvironment(config, instance["InstanceId"])
+        _wait_for_ssm(instance["InstanceId"], config.region)
 
-        _wait_for_ssm(environment.instance_id, config.region)
+        environment = Ec2SandboxEnvironment(
+            instance_id=instance["InstanceId"],
+            region=config.region,
+            s3_bucket=config.s3_bucket,
+            s3_key_prefix=config.s3_key_prefix,
+        )
 
         return {"default": environment}
 
@@ -135,11 +194,15 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         interrupted: bool,
     ) -> None:
         if not interrupted:
+            provider = get_ec2_instance_provider()
             for env in environments.values():
                 if isinstance(env, Ec2SandboxEnvironment):
-                    env.ec2_client.terminate_instances(
-                        InstanceIds=[env.instance_id]
-                    )
+                    if provider is not None:
+                        await provider.terminate_instance(env.instance_id, env.region)
+                    else:
+                        env.ec2_client.terminate_instances(
+                            InstanceIds=[env.instance_id]
+                        )
         return None
 
     @classmethod
@@ -195,65 +258,110 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
         if id is None:
-            ec2 = boto3.client("ec2")
-            response = ec2.describe_instances(
-                Filters=[
-                    {
-                        "Name": f"tag:{MARKER_TAG_KEY}",
-                        "Values": ["true"],
-                    },
-                    {
-                        "Name": "instance-state-name",
-                        "Values": ["pending", "running", "stopping", "stopped"],
-                    },
-                ]
-            )
-            instances = []
-            for reservation in response["Reservations"]:
-                for instance in reservation["Instances"]:
-                    instances.append(instance)
+            provider = get_ec2_instance_provider()
 
-            if instances:
-                vms_table = Table(
-                    box=box.SQUARE,
-                    show_lines=False,
-                    title_style="bold",
-                    title_justify="left",
-                )
-                vms_table.add_column("Instance ID")
-                vms_table.add_column("Instance Name")
-                for instance in instances:
-                    name_tag = ""
-                    if "Tags" in instance:
-                        for tag in instance["Tags"]:
-                            if tag["Key"] == "Name":
-                                name_tag = tag["Value"]
-                                break
-
-                    vms_table.add_row(instance["InstanceId"], name_tag)
-                print(vms_table)
-
-                # Borrowed from the proxmox provider - only prompt if in an interactive shell  # noqa: E501
-                is_interactive_shell = sys.stdin.isatty()
-                is_ci = "CI" in os.environ
-                is_pytest = "PYTEST_CURRENT_TEST" in os.environ
-
-                if is_interactive_shell and not is_ci and not is_pytest:
-                    if not Confirm.ask(
-                        "Are you sure you want to delete ALL the above resources?",
-                    ):
-                        print("Cancelled.")
-                        return
-
-                instance_ids = []
-                for instance in instances:
-                    instance_ids.append(instance["InstanceId"])
-                ec2.terminate_instances(InstanceIds=list(instance_ids))
-
+            if provider is not None:
+                region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", ""))
+                sandbox_infos = await provider.find_sandbox_instances(region)
+                await cls._cli_cleanup_provider(provider, sandbox_infos, region)
             else:
-                print("\nNo EC2 sandbox instances found to clean up.\n")
+                await cls._cli_cleanup_default()
         else:
             print("\n[red]Cleanup by ID not implemented[/red]\n")
+
+    @classmethod
+    async def _cli_cleanup_provider(
+        cls,
+        provider: "Ec2InstanceProvider",
+        instances: list[SandboxInstanceInfo],
+        fallback_region: str,
+    ) -> None:
+        if not instances:
+            print("\nNo EC2 sandbox instances found to clean up.\n")
+            return
+
+        vms_table = Table(
+            box=box.SQUARE, show_lines=False,
+            title_style="bold", title_justify="left",
+        )
+        vms_table.add_column("Instance ID")
+        vms_table.add_column("Instance Name")
+        for inst in instances:
+            vms_table.add_row(inst.instance_id, inst.name)
+        print(vms_table)
+
+        if not cls._confirm_cleanup():
+            return
+
+        for inst in instances:
+            region = inst.region or fallback_region
+            await provider.terminate_instance(inst.instance_id, region)
+
+    @classmethod
+    async def _cli_cleanup_default(cls) -> None:
+        ec2 = boto3.client("ec2")
+        response = ec2.describe_instances(
+            Filters=[
+                {
+                    "Name": f"tag:{MARKER_TAG_KEY}",
+                    "Values": ["true"],
+                },
+                {
+                    "Name": "instance-state-name",
+                    "Values": [
+                        "pending",
+                        "running",
+                        "stopping",
+                        "stopped",
+                    ],
+                },
+            ]
+        )
+        instances = []
+        for reservation in response["Reservations"]:
+            for instance in reservation["Instances"]:
+                instances.append(instance)
+
+        if not instances:
+            print("\nNo EC2 sandbox instances found to clean up.\n")
+            return
+
+        vms_table = Table(
+            box=box.SQUARE, show_lines=False,
+            title_style="bold", title_justify="left",
+        )
+        vms_table.add_column("Instance ID")
+        vms_table.add_column("Instance Name")
+        for instance in instances:
+            name_tag = ""
+            if "Tags" in instance:
+                for tag in instance["Tags"]:
+                    if tag["Key"] == "Name":
+                        name_tag = tag["Value"]
+                        break
+            vms_table.add_row(instance["InstanceId"], name_tag)
+        print(vms_table)
+
+        if not cls._confirm_cleanup():
+            return
+
+        instance_ids = [inst["InstanceId"] for inst in instances]
+        ec2.terminate_instances(InstanceIds=instance_ids)
+
+    @staticmethod
+    def _confirm_cleanup() -> bool:
+        # Borrowed from the proxmox provider - only prompt if in an interactive shell
+        is_interactive_shell = sys.stdin.isatty()
+        is_ci = "CI" in os.environ
+        is_pytest = "PYTEST_CURRENT_TEST" in os.environ
+
+        if is_interactive_shell and not is_ci and not is_pytest:
+            if not Confirm.ask(
+                "Are you sure you want to delete ALL the above resources?",
+            ):
+                print("Cancelled.")
+                return False
+        return True
 
     @classmethod
     def config_deserialize(cls, config: dict[str, Any]) -> BaseModel:
@@ -262,7 +370,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     def _delete_s3_object(self, key: str) -> None:
         """Delete an object from S3 after it's no longer needed."""
         try:
-            self.s3_client.delete_object(Bucket=self.config.s3_bucket, Key=key)
+            self.s3_client.delete_object(Bucket=self.s3_bucket, Key=key)
             self.logger.debug(f"Deleted S3 object: {key}")
         except Exception as e:
             self.logger.warning(f"Failed to delete S3 object {key}: {e}")
@@ -271,13 +379,13 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         """Delete all objects with a given prefix from S3."""
         try:
             response = self.s3_client.list_objects_v2(
-                Bucket=self.config.s3_bucket, Prefix=prefix
+                Bucket=self.s3_bucket, Prefix=prefix
             )
             if "Contents" in response:
                 objects = [{"Key": obj["Key"]} for obj in response["Contents"]]
                 if objects:
                     self.s3_client.delete_objects(
-                        Bucket=self.config.s3_bucket, Delete={"Objects": objects}
+                        Bucket=self.s3_bucket, Delete={"Objects": objects}
                     )
                     self.logger.debug(f"Deleted S3 objects with prefix: {prefix}")
         except Exception as e:
@@ -288,16 +396,21 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     def _run_command(
         self, s3_key_prefix: str, params: dict[str, Any], timeout: int | None
     ) -> ExecResult:
+        self.logger.debug(
+            "send_command: instance=%s bucket=%s prefix=%s params=%s",
+            self.instance_id, self.s3_bucket, s3_key_prefix, params,
+        )
         # Send command using Session Manager with S3 output
         response = self.ssm_client.send_command(
             InstanceIds=[self.instance_id],
             DocumentName="AWS-RunShellScript",
             Parameters=params,
-            OutputS3BucketName=self.config.s3_bucket,
+            OutputS3BucketName=self.s3_bucket,
             OutputS3KeyPrefix=s3_key_prefix,
         )
 
         command_id = response["Command"]["CommandId"]
+        self.logger.debug("send_command returned command_id=%s", command_id)
 
         stdout_key = (
             f"{s3_key_prefix}{command_id}/{self.instance_id}"
@@ -309,6 +422,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             "/awsrunShellScript/0.awsrunShellScript/"
             "stderr"
         )
+        self.logger.debug("stdout_key=%s stderr_key=%s", stdout_key, stderr_key)
 
         try:
             # Wait for command completion
@@ -319,6 +433,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
                 InstanceId=self.instance_id,
                 WaiterConfig={"Delay": 1, "MaxAttempts": timeout or 3600},
             )
+            self.logger.debug("waiter completed for command_id=%s", command_id)
 
             # Get command output from S3
 
@@ -327,6 +442,10 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             )
             stderr = self._read_s3_file_or_blank(
                 stderr_key, limit_bytes=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
+            )
+            self.logger.debug(
+                "s3 read: stdout=%r (%d bytes) stderr=%r (%d bytes)",
+                stdout[:200], len(stdout), stderr[:200], len(stderr),
             )
 
             # Still get return code from SSM API as it's not stored in S3
@@ -364,6 +483,12 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         self._delete_s3_object(stderr_key)
         self._delete_s3_prefix(f"{s3_key_prefix}{command_id}/")
 
+        self.logger.debug(
+            "ExecResult: rc=%s stdout=%d bytes stderr=%d bytes",
+            return_code,
+            len(stdout),
+            len(stderr),
+        )
         return ExecResult(
             success=return_code == 0,
             returncode=return_code,
@@ -373,10 +498,21 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
     def _get_s3_file_size(self, key: str) -> int:
         try:
-            response = self.s3_client.head_object(Bucket=self.config.s3_bucket, Key=key)
-            return response.get("ContentLength", 0)
+            self.logger.debug("head_object: bucket=%s key=%s", self.s3_bucket, key)
+            response = self.s3_client.head_object(Bucket=self.s3_bucket, Key=key)
+            size = response.get("ContentLength", 0)
+            self.logger.debug("head_object: key=%s size=%d", key, size)
+            return size
         except ClientError as e:
-            if e.response and e.response.get("Error", {}).get("Code", None) == "404":
+            error_code = (
+                e.response.get("Error", {}).get("Code")
+                if e.response
+                else None
+            )
+            self.logger.debug(
+                "head_object error: key=%s code=%s", key, error_code
+            )
+            if error_code == "404":
                 raise KeyError(key)
             else:
                 raise
@@ -389,7 +525,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             if file_size >= limit_bytes:
                 # File is larger than limit, use Range to get only what we need
                 stdout_response = self.s3_client.get_object(
-                    Bucket=self.config.s3_bucket,
+                    Bucket=self.s3_bucket,
                     Key=key,
                     Range=f"bytes=0-{limit_bytes - 1}",
                 )
@@ -400,7 +536,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             else:
                 # File is smaller than limit, get entire file without Range
                 stdout_response = self.s3_client.get_object(
-                    Bucket=self.config.s3_bucket, Key=key
+                    Bucket=self.s3_bucket, Key=key
                 )
                 response_body = stdout_response["Body"].read()
                 return response_body.decode("utf-8")
@@ -411,16 +547,21 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             # Unfortunately it makes it harder in the case of misconfiguration
             # of S3 permissions, since in that case we would also not have anything
             # in S3.
-            self.logger.debug(f"Could not retrieve {key} from S3: {e}")
+            self.logger.debug(
+                "S3 key not found (returning empty): key=%s",
+                key,
+            )
             return ""
 
     @override
-    async def read_file(self, file: str, text: bool = True) -> Union[str, bytes]:  # type: ignore
+    async def read_file(  # type: ignore
+        self, file: str, text: bool = True
+    ) -> Union[str, bytes]:
         file_key = self._s3_key_prefix("read_file") + file
 
         url = self.s3_client.generate_presigned_url(
             "put_object",
-            Params={"Bucket": self.config.s3_bucket, "Key": file_key},
+            Params={"Bucket": self.s3_bucket, "Key": file_key},
             ExpiresIn=60,
         )
 
@@ -471,7 +612,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             if file_size >= SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
                 # File is larger than limit, use Range to get only what we need
                 response = self.s3_client.get_object(
-                    Bucket=self.config.s3_bucket,
+                    Bucket=self.s3_bucket,
                     Key=file_key,
                     Range=f"bytes=0-{SandboxEnvironmentLimits.MAX_READ_FILE_SIZE - 1}",
                 )
@@ -484,7 +625,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             else:
                 # File is smaller than limit, get entire file without Range
                 response = self.s3_client.get_object(
-                    Bucket=self.config.s3_bucket,
+                    Bucket=self.s3_bucket,
                     Key=file_key,
                 )
                 response_body = response["Body"].read()
@@ -512,14 +653,14 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         file_key = self._s3_key_prefix("write_file") + file
 
         self.s3_client.put_object(
-            Bucket=self.config.s3_bucket,
+            Bucket=self.s3_bucket,
             Key=file_key,
             Body=contents,
         )
 
         url = self.s3_client.generate_presigned_url(
             "get_object",
-            Params={"Bucket": self.config.s3_bucket, "Key": file_key},
+            Params={"Bucket": self.s3_bucket, "Key": file_key},
             ExpiresIn=60,
         )
 
@@ -581,4 +722,4 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     ) -> str:
         rand = "".join(random.choices(string.ascii_letters + string.digits, k=8))
         timestamp = datetime.now().isoformat()
-        return f"{self.config.s3_key_prefix}{operation}/{timestamp}-{rand}/"
+        return f"{self.s3_key_prefix}{operation}/{timestamp}-{rand}/"
