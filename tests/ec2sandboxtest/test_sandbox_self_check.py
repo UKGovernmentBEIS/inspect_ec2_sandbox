@@ -1,29 +1,32 @@
 import hashlib
 import subprocess
+from importlib.metadata import entry_points
 from typing import AsyncGenerator, List
 
 import pytest
 from inspect_ai.util._sandbox.self_check import self_check
 
 from ec2sandbox._ec2_sandbox_environment import Ec2SandboxEnvironment
-from ec2sandbox.schema import Ec2SandboxEnvironmentConfig
 
 
 @pytest.fixture
 async def ec2_sandbox_environment() -> AsyncGenerator[Ec2SandboxEnvironment, None]:
-    config = Ec2SandboxEnvironmentConfig.from_settings()
+    # Load inspect_ai entry points so any registered Ec2InstanceProvider is installed.
+    # inspect_ai.eval() does this itself, but this test bypasses eval().
+    for ep in entry_points(group="inspect_ai"):
+        ep.load()
+
     task_name = "unit_test"
     envs = await Ec2SandboxEnvironment.sample_init(
         task_name=task_name,
-        config=config,
+        config=None,
         metadata={},
     )
     assert "default" in envs
     assert isinstance(envs["default"], Ec2SandboxEnvironment)
-    sandbox_environment = envs["default"]
-    yield sandbox_environment
+    yield envs["default"]
     await Ec2SandboxEnvironment.sample_cleanup(
-        task_name=task_name, config=config, environments=envs, interrupted=False
+        task_name=task_name, config=None, environments=envs, interrupted=False
     )
 
 
@@ -57,10 +60,11 @@ async def test_self_check(ec2_sandbox_environment) -> None:
     known_failures: List[str] = [
         # Tests that are never going to pass due to how SSM works:
         "test_read_file_not_allowed",  # user is root, so this doesn't work
-        "test_exec_as_user",  # unsupported
-        "test_exec_as_nonexistent_user",  # unsupported
         "test_write_text_file_without_permissions",  # user is root
         "test_write_binary_file_without_permissions",  # user is root
+        "test_exec_timeout",  # cancel_command requires ssm:CancelCommand
+        "test_exec_stdout_is_limited",  # SSM truncates large output before S3 upload
+        "test_exec_stderr_is_limited",  # SSM truncates large output before S3 upload
     ]
 
     return await check_results_of_self_check(ec2_sandbox_environment, known_failures)

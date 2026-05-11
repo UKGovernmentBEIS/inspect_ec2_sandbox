@@ -1,3 +1,4 @@
+import base64
 import errno
 import os
 import random
@@ -24,37 +25,20 @@ from pydantic import BaseModel
 from rich import box, print
 from rich.prompt import Confirm
 from rich.table import Table
-from tenacity import retry, stop_after_attempt, wait_fixed
 from typing_extensions import Literal, override
 
 from ec2sandbox._instance_provider import (
+    MARKER_TAG_KEY,
+    DefaultEc2InstanceProvider,
     Ec2InstanceProvider,
-    SandboxInstanceInfo,
     get_ec2_instance_provider,
     get_provider_session,
 )
 from ec2sandbox.schema import Ec2SandboxEnvironmentConfig
 
-from ._unpack_tags import convert_tags_for_aws_interface
-
-
-@retry(stop=stop_after_attempt(20), wait=wait_fixed(30))
-def _wait_for_ssm(instance_id: str, ssm_client: Any) -> bool:
-    """Wait for SSM agent to come online on the given instance."""
-    resp = ssm_client.describe_instance_information(
-        InstanceInformationFilterList=[
-            {"key": "InstanceIds", "valueSet": [instance_id]}
-        ]
-    )
-    if (
-        not resp["InstanceInformationList"]
-        or resp["InstanceInformationList"][0]["PingStatus"] != "Online"
-    ):
-        raise Exception("Not ready")
-    return True
-
-
-MARKER_TAG_KEY = "inspect_sandbox"
+# Re-exported for backward compatibility — callers used to import
+# ``MARKER_TAG_KEY`` from this module.
+__all__ = ["Ec2SandboxEnvironment", "Ec2SandboxEnvironmentConfig", "MARKER_TAG_KEY"]
 
 
 @sandboxenv(name="ec2")
@@ -118,6 +102,37 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             cls._get_session()
 
     @classmethod
+    def _resolve_provider(
+        cls, config: SandboxEnvironmentConfigType | None
+    ) -> tuple[Ec2InstanceProvider, Ec2SandboxEnvironmentConfig]:
+        """Return the provider to use plus the config it should consume.
+
+        Custom provider, if registered, takes precedence. Otherwise build
+        a :class:`DefaultEc2InstanceProvider` from ``config`` (or from
+        environment settings when ``config`` is ``None``).
+        """
+        registered = get_ec2_instance_provider()
+        if isinstance(config, Ec2SandboxEnvironmentConfig):
+            resolved_config = config
+        elif config is None:
+            resolved_config = (
+                Ec2SandboxEnvironmentConfig()
+                if registered is not None
+                else Ec2SandboxEnvironmentConfig.from_settings(
+                    session=cls._get_session()
+                )
+            )
+        else:
+            raise ValueError("config must be a Ec2SandboxEnvironmentConfig")
+
+        if registered is not None:
+            return registered, resolved_config
+        return (
+            DefaultEc2InstanceProvider(resolved_config, cls._get_session()),
+            resolved_config,
+        )
+
+    @classmethod
     @override
     async def sample_init(
         cls,
@@ -125,91 +140,37 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         metadata: dict[str, str],
     ) -> dict[str, SandboxEnvironment]:
-        provider = get_ec2_instance_provider()
+        provider, resolved = cls._resolve_provider(config)
 
-        # Base tags shared by both the custom-provider and default paths.
-        # Each path prepends config.extra_tags in its own way.
-        tags = [
+        tags: list[tuple[str, str]] = list(resolved.extra_tags) + [
             ("Name", f"inspect_ec2_sandbox_{task_name}"),
             ("inspect_task", task_name),
             (MARKER_TAG_KEY, "true"),
         ]
 
-        if provider is not None:
-            # Custom provider path — provider handles all provisioning.
-            instance_type = (
-                config.instance_type
-                if isinstance(config, Ec2SandboxEnvironmentConfig)
-                else "t3a.large"
-            )
-            ami_id = (
-                config.ami_id
-                if isinstance(config, Ec2SandboxEnvironmentConfig)
-                else ""
-            )
-            if isinstance(config, Ec2SandboxEnvironmentConfig) and config.extra_tags:
-                tags = list(config.extra_tags) + tags
-
-            cls.logger.debug(
-                "sample_init: custom provider, type=%s ami=%s",
-                instance_type,
-                ami_id,
-            )
-            result = await provider.create_instance(
-                instance_type=instance_type,
-                ami_id=ami_id,
-                tags=tags,
-            )
-            cls.logger.debug(
-                "sample_init: provider returned id=%s region=%s",
-                result.instance_id,
-                result.region,
-            )
-            environment = Ec2SandboxEnvironment(
-                instance_id=result.instance_id,
-                region=result.region,
-                s3_bucket=result.s3_bucket,
-                s3_key_prefix=result.s3_key_prefix,
-            )
-            return {"default": environment}
-
-        # Default path — direct EC2/SSM calls using Ec2SandboxEnvironmentConfig.
-        session = cls._get_session()
-        if config is None:
-            config = Ec2SandboxEnvironmentConfig.from_settings(session=session)
-        if not isinstance(config, Ec2SandboxEnvironmentConfig):
-            raise ValueError("config must be a Ec2SandboxEnvironmentConfig")
-
-        ec2_client = session.client("ec2", region_name=config.region)
-
-        tags = list(config.extra_tags) + tags
-
-        instance_params = {
-            "ImageId": config.ami_id,
-            "InstanceType": config.instance_type,
-            "SecurityGroupIds": [config.security_group_id],
-            "SubnetId": config.subnet_id,
-            "TagSpecifications": convert_tags_for_aws_interface(
-                "instance", tuple(tags)
-            ),
-            "IamInstanceProfile": {"Name": config.instance_profile},
-        }
-
-        response = ec2_client.run_instances(**instance_params, MinCount=1, MaxCount=1)
-
-        instance = response["Instances"][0]
-        waiter = ec2_client.get_waiter("instance_running")
-        waiter.wait(InstanceIds=[instance["InstanceId"]])
-
-        environment = Ec2SandboxEnvironment(
-            instance_id=instance["InstanceId"],
-            region=config.region,
-            s3_bucket=config.s3_bucket,
-            s3_key_prefix=config.s3_key_prefix,
+        cls.logger.debug(
+            "sample_init: provider=%s type=%s ami=%s",
+            type(provider).__name__,
+            resolved.instance_type,
+            resolved.ami_id,
+        )
+        result = await provider.create_instance(
+            instance_type=resolved.instance_type,
+            ami_id=resolved.ami_id,
+            tags=tags,
+        )
+        cls.logger.debug(
+            "sample_init: provider returned id=%s region=%s",
+            result.instance_id,
+            result.region,
         )
 
-        _wait_for_ssm(environment.instance_id, environment.ssm_client)
-
+        environment = Ec2SandboxEnvironment(
+            instance_id=result.instance_id,
+            region=result.region,
+            s3_bucket=result.s3_bucket,
+            s3_key_prefix=result.s3_key_prefix,
+        )
         return {"default": environment}
 
     @classmethod
@@ -221,16 +182,23 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         environments: Dict[str, SandboxEnvironment],
         interrupted: bool,
     ) -> None:
-        if not interrupted:
-            provider = get_ec2_instance_provider()
-            for env in environments.values():
-                if isinstance(env, Ec2SandboxEnvironment):
-                    if provider is not None:
-                        await provider.terminate_instance(env.instance_id, env.region)
-                    else:
-                        env.ec2_client.terminate_instances(
-                            InstanceIds=[env.instance_id]
-                        )
+        if interrupted:
+            return None
+
+        # Cleanup only needs terminate_instance, which doesn't depend on
+        # the direct-EC2 infra fields. A minimal default config is fine
+        # when none was supplied.
+        registered = get_ec2_instance_provider()
+        if registered is not None:
+            provider: Ec2InstanceProvider = registered
+        else:
+            provider = DefaultEc2InstanceProvider(
+                Ec2SandboxEnvironmentConfig(), cls._get_session()
+            )
+
+        for env in environments.values():
+            if isinstance(env, Ec2SandboxEnvironment):
+                await provider.terminate_instance(env.instance_id, env.region)
         return None
 
     @classmethod
@@ -254,22 +222,36 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         timeout: int | None = None,
         timeout_retry: bool = True,
     ) -> ExecResult[str]:
-        if input is not None:
-            self.logger.warning("Input parameter not supported by EC2 sandbox")
+        inner: list[str] = []
 
-        if user is not None:
-            self.logger.warning("User parameter not supported by EC2 sandbox")
-
-        commands = []
-
-        commands.extend(
+        inner.extend(
             [f"export {shlex.quote(k)}={shlex.quote(v)}" for k, v in env.items()]
         )
 
         if cwd is not None:
-            commands.append(f"cd {shlex.quote(cwd)}")
+            inner.append(f"cd {shlex.quote(cwd)}")
 
-        commands.append(shlex.join(cmd))
+        if input is None:
+            inner.append(shlex.join(cmd))
+        else:
+            input_bytes = input.encode("utf-8") if isinstance(input, str) else input
+            input_b64 = base64.b64encode(input_bytes).decode("ascii")
+            inner.append(
+                f"printf %s {shlex.quote(input_b64)} | base64 -d | {shlex.join(cmd)}"
+            )
+
+        if user is None:
+            commands = inner
+        else:
+            # Run the inner script as `user`. A heredoc with a quoted marker
+            # avoids having to re-quote the whole script for `su -c`.
+            heredoc_suffix = "".join(random.choices(string.ascii_uppercase, k=8))
+            heredoc = f"EOF_EC2SB_{heredoc_suffix}"
+            commands = [
+                f"su -l {shlex.quote(user)} -s /bin/bash << '{heredoc}'",
+                *inner,
+                heredoc,
+            ]
 
         params: dict[str, Any] = {
             "commands": commands,
@@ -285,25 +267,21 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     @classmethod
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
-        if id is None:
-            provider = get_ec2_instance_provider()
-
-            if provider is not None:
-                region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", ""))
-                sandbox_infos = await provider.find_sandbox_instances(region)
-                await cls._cli_cleanup_provider(provider, sandbox_infos, region)
-            else:
-                await cls._cli_cleanup_default()
-        else:
+        if id is not None:
             print("\n[red]Cleanup by ID not implemented[/red]\n")
+            return
 
-    @classmethod
-    async def _cli_cleanup_provider(
-        cls,
-        provider: "Ec2InstanceProvider",
-        instances: list[SandboxInstanceInfo],
-        fallback_region: str,
-    ) -> None:
+        registered = get_ec2_instance_provider()
+        if registered is not None:
+            provider: Ec2InstanceProvider = registered
+        else:
+            provider = DefaultEc2InstanceProvider(
+                Ec2SandboxEnvironmentConfig(), cls._get_session()
+            )
+
+        fallback_region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", ""))
+        instances = await provider.find_sandbox_instances(fallback_region)
+
         if not instances:
             print("\nNo EC2 sandbox instances found to clean up.\n")
             return
@@ -324,57 +302,6 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         for inst in instances:
             region = inst.region or fallback_region
             await provider.terminate_instance(inst.instance_id, region)
-
-    @classmethod
-    async def _cli_cleanup_default(cls) -> None:
-        ec2 = cls._get_session().client("ec2")
-        response = ec2.describe_instances(
-            Filters=[
-                {
-                    "Name": f"tag:{MARKER_TAG_KEY}",
-                    "Values": ["true"],
-                },
-                {
-                    "Name": "instance-state-name",
-                    "Values": [
-                        "pending",
-                        "running",
-                        "stopping",
-                        "stopped",
-                    ],
-                },
-            ]
-        )
-        instances = []
-        for reservation in response["Reservations"]:
-            for instance in reservation["Instances"]:
-                instances.append(instance)
-
-        if not instances:
-            print("\nNo EC2 sandbox instances found to clean up.\n")
-            return
-
-        vms_table = Table(
-            box=box.SQUARE, show_lines=False,
-            title_style="bold", title_justify="left",
-        )
-        vms_table.add_column("Instance ID")
-        vms_table.add_column("Instance Name")
-        for instance in instances:
-            name_tag = ""
-            if "Tags" in instance:
-                for tag in instance["Tags"]:
-                    if tag["Key"] == "Name":
-                        name_tag = tag["Value"]
-                        break
-            vms_table.add_row(instance["InstanceId"], name_tag)
-        print(vms_table)
-
-        if not cls._confirm_cleanup():
-            return
-
-        instance_ids = [inst["InstanceId"] for inst in instances]
-        ec2.terminate_instances(InstanceIds=instance_ids)
 
     @staticmethod
     def _confirm_cleanup() -> bool:

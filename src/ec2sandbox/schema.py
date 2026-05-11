@@ -53,16 +53,23 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
         extra_tags: tuple of 2-tuples of additional tags
     """
 
-    region: str
-    vpc_id: str  # TODO is this actually needed, we could just force a subnet ID
-    security_group_id: str
-    subnet_id: str
-    ami_id: str
-    instance_type: str
-    instance_profile: str
-    s3_bucket: str
-    s3_key_prefix: str
-    extra_tags: Tuple[Tuple[str, str], ...]
+    # Shared fields — used by both the direct-EC2 path and any custom
+    # Ec2InstanceProvider. Have sensible defaults.
+    instance_type: str = "t3a.large"
+    ami_id: str = ""  # empty -> provider chooses or from_settings resolves
+    extra_tags: Tuple[Tuple[str, str], ...] = ()
+    s3_key_prefix: str = ""
+
+    # Direct-EC2-path fields — required when no Ec2InstanceProvider is
+    # registered, ignored otherwise. ``sample_init`` validates these at
+    # call time when the direct path is taken.
+    region: Optional[str] = None
+    # TODO is vpc_id actually needed? We could just force a subnet ID.
+    vpc_id: Optional[str] = None
+    security_group_id: Optional[str] = None
+    subnet_id: Optional[str] = None
+    instance_profile: Optional[str] = None
+    s3_bucket: Optional[str] = None
 
     @classmethod
     def from_settings(cls, session: "boto3.Session | None" = None, **kwargs):

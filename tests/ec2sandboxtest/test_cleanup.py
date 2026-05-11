@@ -1,4 +1,5 @@
 import asyncio
+from importlib.metadata import entry_points
 from typing import Tuple
 
 import boto3
@@ -9,6 +10,7 @@ from ec2sandbox._ec2_sandbox_environment import (
     Ec2SandboxEnvironment,
     Ec2SandboxEnvironmentConfig,
 )
+from ec2sandbox._instance_provider import get_ec2_instance_provider
 
 
 async def test_cleanup():
@@ -53,7 +55,17 @@ async def test_cli_cleanup() -> None:
 async def _create_environment(
     task_name: str,
 ) -> Tuple[Ec2SandboxEnvironmentConfig, dict[str, SandboxEnvironment], str]:
-    config = Ec2SandboxEnvironmentConfig.from_settings(instance_type="t3a.micro")
+    # Load inspect_ai entry points so any registered Ec2InstanceProvider
+    # (e.g. aisi-inspect-tools' Lambda-backed provider) is installed.
+    # inspect_ai.eval() does this itself, but these tests bypass eval().
+    for ep in entry_points(group="inspect_ai"):
+        ep.load()
+
+    config = (
+        Ec2SandboxEnvironmentConfig(instance_type="t3a.micro")
+        if get_ec2_instance_provider() is not None
+        else Ec2SandboxEnvironmentConfig.from_settings(instance_type="t3a.micro")
+    )
 
     envs = await Ec2SandboxEnvironment.sample_init(
         task_name=task_name,
