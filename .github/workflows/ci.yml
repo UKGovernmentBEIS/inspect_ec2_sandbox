@@ -14,26 +14,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: chartboost/ruff-action@v1
-        with:
-          version: 0.9.6
+      - uses: astral-sh/ruff-action@v3
 
   format:
     name: Format (ruff format --check)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: chartboost/ruff-action@v1
+      - uses: astral-sh/ruff-action@v3
         with:
           args: "format --check"
-          version: 0.9.6
 
   type-check:
     name: Type check (mypy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - run: uv python install 3.10
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          python-version: "3.10"
       - run: uv sync
       - run: uv run mypy
