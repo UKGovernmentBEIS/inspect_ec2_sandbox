@@ -69,7 +69,7 @@ async def test_volume_size_override() -> None:
         script = (
             "set -e; "
             "root_part=$(findmnt -no SOURCE /); "
-            "disk=$(lsblk -no PKNAME \"$root_part\"); "
+            'disk=$(lsblk -no PKNAME "$root_part"); '
             'sectors=$(cat /sys/block/"$disk"/size); '
             "echo $((sectors / 2097152))"
         )

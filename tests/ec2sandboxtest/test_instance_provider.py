@@ -22,9 +22,7 @@ def _make_config(**overrides) -> Ec2SandboxEnvironmentConfig:
 
 def _make_provider_with_mocks(config):
     ec2_client = mock.MagicMock()
-    ec2_client.run_instances.return_value = {
-        "Instances": [{"InstanceId": "i-abc"}]
-    }
+    ec2_client.run_instances.return_value = {"Instances": [{"InstanceId": "i-abc"}]}
     ec2_client.describe_images.return_value = {
         "Images": [{"RootDeviceName": "/dev/sda1"}]
     }
@@ -66,9 +64,7 @@ async def test_create_instance_no_volume_size_omits_block_device_mappings():
 
 @pytest.mark.asyncio
 async def test_create_instance_with_volume_size_sets_block_device_mappings():
-    provider, ec2_client = _make_provider_with_mocks(
-        _make_config(volume_size=100)
-    )
+    provider, ec2_client = _make_provider_with_mocks(_make_config(volume_size=100))
 
     await provider.create_instance(
         instance_type="t3a.micro",
