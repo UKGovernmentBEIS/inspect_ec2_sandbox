@@ -98,28 +98,29 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
         # Override with any provided kwargs
         params.update(kwargs)
 
-        if params["region"] is None:
-            aws_region = os.getenv("AWS_REGION")
-            if aws_region is not None:
-                params["region"] = aws_region
-            else:
-                raise ValueError(
-                    "Region must be specified either in settings,"
-                    f" or as an environment variable {env_prefix}REGION or AWS_REGION."
-                )
+        region = params["region"]
+        if region is None:
+            region = os.getenv("AWS_REGION")
+        if not isinstance(region, str):
+            raise ValueError(
+                "Region must be specified either in settings,"
+                f" or as an environment variable {env_prefix}REGION or AWS_REGION."
+            )
+        params["region"] = region
 
         if params["ami_id"] is None:
-            params["ami_id"] = _find_ami_ubu24(params["region"], session=session)
+            params["ami_id"] = _find_ami_ubu24(region, session=session)
 
         if params["instance_type"] is None:
             params["instance_type"] = "t3a.large"
 
-        if params["s3_key_prefix"] is None:
-            params["s3_key_prefix"] = ""
-
-        if params["s3_key_prefix"].startswith("/"):
+        s3_key_prefix = params["s3_key_prefix"]
+        if s3_key_prefix is None:
+            s3_key_prefix = ""
+            params["s3_key_prefix"] = s3_key_prefix
+        if isinstance(s3_key_prefix, str) and s3_key_prefix.startswith("/"):
             raise ValueError(
-                f"S3 key prefix '{params['s3_key_prefix']}' must not start with a '/'"
+                f"S3 key prefix '{s3_key_prefix}' must not start with a '/'"
             )
 
         return cls(**params)
