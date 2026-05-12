@@ -51,6 +51,8 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
             Useful if you want to constrain the sandbox
             to a specific folder in the bucket
         extra_tags: tuple of 2-tuples of additional tags
+        volume_size: Root EBS volume size in GiB (optional). If None, the
+            AMI's baked-in size is used.
     """
 
     # Shared fields — used by both the direct-EC2 path and any custom
@@ -59,6 +61,7 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
     ami_id: str = ""  # empty -> provider chooses or from_settings resolves
     extra_tags: Tuple[Tuple[str, str], ...] = ()
     s3_key_prefix: str = ""
+    volume_size: Optional[int] = None
 
     # Direct-EC2-path fields — required when no Ec2InstanceProvider is
     # registered, ignored otherwise. ``sample_init`` validates these at
