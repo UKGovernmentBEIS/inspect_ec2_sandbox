@@ -36,8 +36,9 @@ class Ec2SandboxStack(cdk.Stack):
         """
         super().__init__(scope, id, **kwargs)
 
-        # VPC with single AZ, two private subnets - one isolated, one with internet access
-        # Enable DNS hostnames and resolution for S3 gateway endpoint
+        # VPC with single AZ, two private subnets - one isolated, one with
+        # internet access. Enable DNS hostnames and resolution for S3 gateway
+        # endpoint.
         self.vpc = ec2.Vpc(
             self,
             "Vpc",
@@ -73,7 +74,11 @@ class Ec2SandboxStack(cdk.Stack):
         self.vpc.add_gateway_endpoint(
             "S3Endpoint",
             service=ec2.GatewayVpcEndpointAwsService.S3,
-            subnets=[ec2.SubnetSelection(subnets=[private_isolated_subnet, private_with_internet_subnet])],
+            subnets=[
+                ec2.SubnetSelection(
+                    subnets=[private_isolated_subnet, private_with_internet_subnet]
+                )
+            ],
         )
 
         self.security_group = ec2.SecurityGroup(
@@ -201,7 +206,10 @@ class Ec2SandboxStack(cdk.Stack):
             self,
             "InspectEc2SandboxSubnetIdNoInternet",
             value=private_isolated_subnet.subnet_id,
-            description="Private isolated subnet ID for EC2 sandbox instances (no internet access)",
+            description=(
+                "Private isolated subnet ID for EC2 sandbox instances"
+                " (no internet access)"
+            ),
             export_name="INSPECT-EC2-SANDBOX-SUBNET-ID-NO-INTERNET",
         )
 
@@ -209,6 +217,8 @@ class Ec2SandboxStack(cdk.Stack):
             self,
             "InspectEc2SandboxSubnetIdWithInternet",
             value=private_with_internet_subnet.subnet_id,
-            description="Private subnet ID for EC2 sandbox instances (with internet access)",
+            description=(
+                "Private subnet ID for EC2 sandbox instances (with internet access)"
+            ),
             export_name="INSPECT-EC2-SANDBOX-SUBNET-ID-WITH-INTERNET",
         )

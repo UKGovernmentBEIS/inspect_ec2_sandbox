@@ -8,6 +8,3 @@ def has_aws_creds():
         return True
     except (BotoCoreError, ClientError):
         return False
-
-
-

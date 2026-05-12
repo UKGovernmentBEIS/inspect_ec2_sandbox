@@ -3,6 +3,7 @@
 This module initializes and configures the AWS CDK application that
 deploys the EC2 Sandbox infrastructure stack.
 """
+
 import aws_cdk as cdk
 from ec2sandboxinfra.ec2sandbox_stack import Ec2SandboxStack
 
