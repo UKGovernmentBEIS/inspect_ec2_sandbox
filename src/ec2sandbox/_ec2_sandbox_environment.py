@@ -154,10 +154,18 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             resolved.instance_type,
             resolved.ami_id,
         )
+        # Pass volume_size only when set, so providers that pre-date this
+        # parameter keep working unchanged. A caller that sets volume_size
+        # against such a provider will get a clear TypeError pointing at
+        # the unsupported kwarg.
+        extra: dict[str, Any] = {}
+        if resolved.volume_size is not None:
+            extra["volume_size"] = resolved.volume_size
         result = await provider.create_instance(
             instance_type=resolved.instance_type,
             ami_id=resolved.ami_id,
             tags=tags,
+            **extra,
         )
         cls.logger.debug(
             "sample_init: provider returned id=%s region=%s",

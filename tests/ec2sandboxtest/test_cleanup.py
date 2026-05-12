@@ -52,8 +52,46 @@ async def test_cli_cleanup() -> None:
     assert new_instance_id not in post_cleanup_instance_ids
 
 
+async def test_volume_size_override() -> None:
+    # Pick a size that's distinct from any provider default and from the
+    # AMI's baked-in size, so the override is observable end-to-end.
+    requested_size = 220
+    config, envs, _ = await _create_environment(
+        task_name="test_volume_size_override",
+        volume_size=requested_size,
+    )
+
+    try:
+        env = envs["default"]
+        assert isinstance(env, Ec2SandboxEnvironment)
+        # findmnt → root partition, PKNAME → parent disk, /sys/block/<d>/size
+        # is in 512-byte sectors. Divide by 2**21 to convert to GiB.
+        script = (
+            "set -e; "
+            "root_part=$(findmnt -no SOURCE /); "
+            'disk=$(lsblk -no PKNAME "$root_part"); '
+            'sectors=$(cat /sys/block/"$disk"/size); '
+            "echo $((sectors / 2097152))"
+        )
+        result = await env.exec(["bash", "-c", script], timeout=60)
+        assert result.success, f"failed to inspect disk size: {result.stderr}"
+        observed_gib = int(result.stdout.strip())
+        assert observed_gib == requested_size, (
+            f"Expected root disk of {requested_size} GiB, observed {observed_gib} "
+            f"GiB (stdout={result.stdout!r})"
+        )
+    finally:
+        await Ec2SandboxEnvironment.sample_cleanup(
+            task_name="test_volume_size_override",
+            config=config,
+            environments=envs,
+            interrupted=False,
+        )
+
+
 async def _create_environment(
     task_name: str,
+    volume_size: int | None = None,
 ) -> Tuple[Ec2SandboxEnvironmentConfig, dict[str, SandboxEnvironment], str]:
     # Load inspect_ai entry points so any registered Ec2InstanceProvider
     # (e.g. aisi-inspect-tools' Lambda-backed provider) is installed.
@@ -61,10 +99,14 @@ async def _create_environment(
     for ep in entry_points(group="inspect_ai"):
         ep.load()
 
+    overrides: dict[str, object] = {"instance_type": "t3a.micro"}
+    if volume_size is not None:
+        overrides["volume_size"] = volume_size
+
     config = (
-        Ec2SandboxEnvironmentConfig(instance_type="t3a.micro")
+        Ec2SandboxEnvironmentConfig(**overrides)
         if get_ec2_instance_provider() is not None
-        else Ec2SandboxEnvironmentConfig.from_settings(instance_type="t3a.micro")
+        else Ec2SandboxEnvironmentConfig.from_settings(**overrides)
     )
 
     envs = await Ec2SandboxEnvironment.sample_init(

@@ -74,6 +74,7 @@ class Ec2InstanceProvider(Protocol):
         instance_type: str,
         ami_id: str,
         tags: list[tuple[str, str]],
+        volume_size: int | None = None,
     ) -> ProvisionedInstance:
         """Create an EC2 instance and wait until it is SSM-ready.
 
@@ -82,6 +83,8 @@ class Ec2InstanceProvider(Protocol):
             ami_id: AMI to launch.  May be empty if the provider
                 resolves its own AMI.
             tags: Key/value pairs to apply to the instance.
+            volume_size: Optional override (GiB) for the root EBS
+                volume size. ``None`` keeps the AMI's baked-in size.
 
         Returns:
             A :class:`ProvisionedInstance` with the runtime config
@@ -152,6 +155,15 @@ def get_provider_session(
 # ---------------------------------------------------------------------------
 
 
+def _root_device_name(ec2_client: Any, ami_id: str) -> str:
+    """Return the root device name (e.g. ``/dev/sda1``) for ``ami_id``."""
+    resp = ec2_client.describe_images(ImageIds=[ami_id])
+    images = resp.get("Images", [])
+    if not images:
+        raise ValueError(f"AMI {ami_id} not found when resolving root device name")
+    return images[0]["RootDeviceName"]
+
+
 @retry(stop=stop_after_attempt(20), wait=wait_fixed(30))
 def _wait_for_ssm(instance_id: str, ssm_client: Any) -> bool:
     """Wait for SSM agent to come online on the given instance."""
@@ -195,6 +207,7 @@ class DefaultEc2InstanceProvider:
         instance_type: str,
         ami_id: str,
         tags: list[tuple[str, str]],
+        volume_size: int | None = None,
     ) -> ProvisionedInstance:
         cfg = self._config
         required = {
@@ -215,7 +228,7 @@ class DefaultEc2InstanceProvider:
             )
 
         ec2_client = self._session.client("ec2", region_name=cfg.region)
-        instance_params = {
+        instance_params: dict[str, Any] = {
             "ImageId": ami_id,
             "InstanceType": instance_type,
             "SecurityGroupIds": [cfg.security_group_id],
@@ -225,6 +238,13 @@ class DefaultEc2InstanceProvider:
             ),
             "IamInstanceProfile": {"Name": cfg.instance_profile},
         }
+        if volume_size is not None:
+            instance_params["BlockDeviceMappings"] = [
+                {
+                    "DeviceName": _root_device_name(ec2_client, ami_id),
+                    "Ebs": {"VolumeSize": volume_size},
+                }
+            ]
         response = ec2_client.run_instances(**instance_params, MinCount=1, MaxCount=1)
         instance = response["Instances"][0]
         instance_id = instance["InstanceId"]
