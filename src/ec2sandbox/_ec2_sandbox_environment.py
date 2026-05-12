@@ -225,11 +225,13 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         cmd: List[str],
         input: str | bytes | None = None,
         cwd: str | None = None,
-        env: dict[str, str] = {},
+        env: dict[str, str] | None = None,
         user: str | None = None,
         timeout: int | None = None,
         timeout_retry: bool = True,
+        concurrency: bool = True,
     ) -> ExecResult[str]:
+        env = env or {}
         inner: list[str] = []
 
         inner.extend(
@@ -295,8 +297,10 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             return
 
         vms_table = Table(
-            box=box.SQUARE, show_lines=False,
-            title_style="bold", title_justify="left",
+            box=box.SQUARE,
+            show_lines=False,
+            title_style="bold",
+            title_justify="left",
         )
         vms_table.add_column("Instance ID")
         vms_table.add_column("Instance Name")
@@ -361,7 +365,10 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     ) -> ExecResult:
         self.logger.debug(
             "send_command: instance=%s bucket=%s prefix=%s params=%s",
-            self.instance_id, self.s3_bucket, s3_key_prefix, params,
+            self.instance_id,
+            self.s3_bucket,
+            s3_key_prefix,
+            params,
         )
         # Send command using Session Manager with S3 output
         response = self.ssm_client.send_command(
@@ -408,7 +415,10 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             )
             self.logger.debug(
                 "s3 read: stdout=%r (%d bytes) stderr=%r (%d bytes)",
-                stdout[:200], len(stdout), stderr[:200], len(stderr),
+                stdout[:200],
+                len(stdout),
+                stderr[:200],
+                len(stderr),
             )
 
             # Still get return code from SSM API as it's not stored in S3
@@ -467,14 +477,8 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             self.logger.debug("head_object: key=%s size=%d", key, size)
             return size
         except ClientError as e:
-            error_code = (
-                e.response.get("Error", {}).get("Code")
-                if e.response
-                else None
-            )
-            self.logger.debug(
-                "head_object error: key=%s code=%s", key, error_code
-            )
+            error_code = e.response.get("Error", {}).get("Code") if e.response else None
+            self.logger.debug("head_object error: key=%s code=%s", key, error_code)
             if error_code == "404":
                 raise KeyError(key)
             else:
@@ -503,7 +507,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
                 )
                 response_body = stdout_response["Body"].read()
                 return response_body.decode("utf-8")
-        except (self.s3_client.exceptions.NoSuchKey, KeyError) as e:
+        except (self.s3_client.exceptions.NoSuchKey, KeyError):
             # When using SSM with S3 output, if the stdout or stderr are empty
             # it just doesn't create the S3 object, so we will see this error
             # in that case.

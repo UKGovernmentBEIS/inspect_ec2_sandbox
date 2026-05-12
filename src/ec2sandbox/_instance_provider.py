@@ -245,9 +245,7 @@ class DefaultEc2InstanceProvider:
                     "Ebs": {"VolumeSize": volume_size},
                 }
             ]
-        response = ec2_client.run_instances(
-            **instance_params, MinCount=1, MaxCount=1
-        )
+        response = ec2_client.run_instances(**instance_params, MinCount=1, MaxCount=1)
         instance = response["Instances"][0]
         instance_id = instance["InstanceId"]
 
@@ -270,9 +268,7 @@ class DefaultEc2InstanceProvider:
         ec2 = self._session.client("ec2", region_name=region or None)
         ec2.terminate_instances(InstanceIds=[instance_id])
 
-    async def find_sandbox_instances(
-        self, region: str
-    ) -> list[SandboxInstanceInfo]:
+    async def find_sandbox_instances(self, region: str) -> list[SandboxInstanceInfo]:
         ec2 = self._session.client("ec2", region_name=region or None)
         response = ec2.describe_instances(
             Filters=[

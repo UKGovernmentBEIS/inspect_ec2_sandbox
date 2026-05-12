@@ -115,7 +115,9 @@ async def _create_environment(
         metadata={},
     )
 
-    new_instance_id = envs["default"].instance_id
+    default_env = envs["default"]
+    assert isinstance(default_env, Ec2SandboxEnvironment)
+    new_instance_id = default_env.instance_id
 
     return config, envs, new_instance_id
 

@@ -15,7 +15,9 @@ def env_vars_all() -> dict[str, str]:
         "INSPECT_EC2_SANDBOX_SECURITY_GROUP_ID": "sg-456",
         "INSPECT_EC2_SANDBOX_SUBNET_ID": "subnet-654321",
         "INSPECT_EC2_SANDBOX_AMI_ID": "ami-789",
-        "INSPECT_EC2_SANDBOX_INSTANCE_PROFILE": "Ec2SandboxStack-SandboxInstanceProfile123-456",
+        "INSPECT_EC2_SANDBOX_INSTANCE_PROFILE": (
+            "Ec2SandboxStack-SandboxInstanceProfile123-456"
+        ),
         "INSPECT_EC2_SANDBOX_S3_BUCKET": "fake-bucket",
     }
 
