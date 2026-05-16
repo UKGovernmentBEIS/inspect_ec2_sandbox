@@ -190,9 +190,6 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         environments: Dict[str, SandboxEnvironment],
         interrupted: bool,
     ) -> None:
-        if interrupted:
-            return None
-
         # Cleanup only needs terminate_instance, which doesn't depend on
         # the direct-EC2 infra fields. A minimal default config is fine
         # when none was supplied.
