@@ -62,7 +62,8 @@ async def test_happy_path_terminates_via_sample_cleanup(
         # Defensive: even if assertions failed, don't leak the instance.
         if instance_state(inst_id) in ("pending", "running"):
             provider = Ec2SandboxEnvironment._resolve_cleanup_provider()
-            await provider.terminate_instance(inst_id, REGION)
+            async with Ec2SandboxEnvironment._entered(provider) as p:
+                await p.terminate_instance(inst_id, REGION)
 
 
 async def test_interrupted_sample_cleanup_skips_then_task_cleanup_sweeps(
@@ -92,7 +93,8 @@ async def test_interrupted_sample_cleanup_skips_then_task_cleanup_sweeps(
     finally:
         if instance_state(inst_id) in ("pending", "running"):
             provider = Ec2SandboxEnvironment._resolve_cleanup_provider()
-            await provider.terminate_instance(inst_id, REGION)
+            async with Ec2SandboxEnvironment._entered(provider) as p:
+                await p.terminate_instance(inst_id, REGION)
 
 
 async def test_task_cleanup_respects_no_sandbox_cleanup(
@@ -114,7 +116,8 @@ async def test_task_cleanup_respects_no_sandbox_cleanup(
         assert "inspect sandbox cleanup ec2" in captured.out
     finally:
         provider = Ec2SandboxEnvironment._resolve_cleanup_provider()
-        await provider.terminate_instance(inst_id, REGION)
+        async with Ec2SandboxEnvironment._entered(provider) as p:
+            await p.terminate_instance(inst_id, REGION)
 
 
 async def test_multiple_samples_one_interrupted(
@@ -157,6 +160,7 @@ async def test_multiple_samples_one_interrupted(
         assert wait_until_terminated(inst_b) in ("terminated", "shutting-down", None)
     finally:
         provider = Ec2SandboxEnvironment._resolve_cleanup_provider()
-        for inst in (inst_a, inst_b):
-            if instance_state(inst) in ("pending", "running"):
-                await provider.terminate_instance(inst, REGION)
+        async with Ec2SandboxEnvironment._entered(provider) as p:
+            for inst in (inst_a, inst_b):
+                if instance_state(inst) in ("pending", "running"):
+                    await p.terminate_instance(inst, REGION)

@@ -3,7 +3,7 @@
 The EC2 sandbox provider delegates instance creation, termination, and
 discovery to an ``Ec2InstanceProvider``. When no custom provider is
 registered, :class:`DefaultEc2InstanceProvider` is used, which calls
-EC2 and SSM directly via boto3.
+EC2 and SSM directly via ``aiobotocore``.
 
 External packages (e.g. an organisational wrapper that routes through a
 Lambda or other control plane) can register an alternative provider at
@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import boto3
+from aiobotocore.session import AioSession
+from aiobotocore.session import get_session as get_aio_session
 from botocore.exceptions import ClientError  # noqa: F401  (re-exported for convenience)
 from tenacity import retry, stop_after_attempt, wait_fixed
 
@@ -67,7 +69,31 @@ class Ec2InstanceProvider(Protocol):
     register it with :func:`set_ec2_instance_provider` to route instance
     lifecycle through a different control plane (e.g. an organisational
     Lambda / API).
+
+    Providers are async context managers: ``__aenter__`` is the place to
+    initialize any loop-bound resources (e.g. ``aiobotocore`` / httpx
+    clients, which bind to the running event loop) and ``__aexit__`` is
+    where they should be released. The sandbox enters the provider in
+    :meth:`Ec2SandboxEnvironment.task_init` and exits it in
+    :meth:`Ec2SandboxEnvironment.task_cleanup`, so loop-bound clients
+    have a well-defined lifetime tied to inspect_ai's task lifecycle.
+
+    Sync providers (e.g. boto3-only) may implement ``__aenter__``/
+    ``__aexit__`` as no-ops.
     """
+
+    async def __aenter__(self) -> "Ec2InstanceProvider":
+        """Initialize any loop-bound resources for the current event loop."""
+        ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        """Release any resources acquired in ``__aenter__``."""
+        ...
 
     async def create_instance(
         self,
@@ -155,9 +181,9 @@ def get_provider_session(
 # ---------------------------------------------------------------------------
 
 
-def _root_device_name(ec2_client: Any, ami_id: str) -> str:
+async def _root_device_name(ec2_client: Any, ami_id: str) -> str:
     """Return the root device name (e.g. ``/dev/sda1``) for ``ami_id``."""
-    resp = ec2_client.describe_images(ImageIds=[ami_id])
+    resp = await ec2_client.describe_images(ImageIds=[ami_id])
     images = resp.get("Images", [])
     if not images:
         raise ValueError(f"AMI {ami_id} not found when resolving root device name")
@@ -165,9 +191,9 @@ def _root_device_name(ec2_client: Any, ami_id: str) -> str:
 
 
 @retry(stop=stop_after_attempt(20), wait=wait_fixed(30))
-def _wait_for_ssm(instance_id: str, ssm_client: Any) -> bool:
-    """Wait for SSM agent to come online on the given instance."""
-    resp = ssm_client.describe_instance_information(
+async def _wait_for_ssm(instance_id: str, ssm_client: Any) -> bool:
+    """Wait for the SSM agent to come online on the given instance."""
+    resp = await ssm_client.describe_instance_information(
         InstanceInformationFilterList=[
             {"key": "InstanceIds", "valueSet": [instance_id]}
         ]
@@ -181,7 +207,7 @@ def _wait_for_ssm(instance_id: str, ssm_client: Any) -> bool:
 
 
 class DefaultEc2InstanceProvider:
-    """Default :class:`Ec2InstanceProvider` using direct boto3 calls.
+    """Default :class:`Ec2InstanceProvider` using ``aiobotocore`` for EC2/SSM.
 
     Used by the EC2 sandbox when no custom provider has been registered.
     Reads the infrastructure fields (``region``, ``security_group_id``,
@@ -189,6 +215,10 @@ class DefaultEc2InstanceProvider:
     point they are needed — ``create_instance`` requires the full set,
     while ``terminate_instance`` and ``find_sandbox_instances`` only
     need the supplied ``region``.
+
+    The ec2/ssm clients are loop-bound: they're created in
+    ``__aenter__`` and closed in ``__aexit__``. Calling any async method
+    before entering raises ``RuntimeError``.
     """
 
     def __init__(
@@ -197,7 +227,72 @@ class DefaultEc2InstanceProvider:
         session: boto3.Session,
     ) -> None:
         self._config = config
+        # The sync boto3 session is still used by ``Ec2SandboxEnvironment``
+        # for its runtime operations (SSM SendCommand, S3 reads/writes).
+        # We don't convert those here; we only convert the provider's own
+        # EC2/SSM control-plane calls to aiobotocore.
         self._session = session
+        # Loop-bound state created in __aenter__:
+        self._aio_session: AioSession | None = None
+        self._ec2_cm: Any = None
+        self._ssm_cm: Any = None
+        self._ec2_client: Any = None
+        self._ssm_client: Any = None
+
+    async def __aenter__(self) -> "DefaultEc2InstanceProvider":
+        cfg = self._config
+        self._aio_session = get_aio_session()
+        # Create both clients eagerly so a single ``__aexit__`` always
+        # closes everything we opened.
+        self._ec2_cm = self._aio_session.create_client(
+            "ec2", region_name=cfg.region or None
+        )
+        self._ec2_client = await self._ec2_cm.__aenter__()
+        self._ssm_cm = self._aio_session.create_client(
+            "ssm", region_name=cfg.region or None
+        )
+        self._ssm_client = await self._ssm_cm.__aenter__()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        # Best-effort close in reverse order; one failure shouldn't
+        # block the other.
+        try:
+            if self._ssm_cm is not None:
+                await self._ssm_cm.__aexit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._ssm_cm = None
+            self._ssm_client = None
+            try:
+                if self._ec2_cm is not None:
+                    await self._ec2_cm.__aexit__(exc_type, exc_val, exc_tb)
+            finally:
+                self._ec2_cm = None
+                self._ec2_client = None
+                self._aio_session = None
+
+    def _require_ec2(self) -> Any:
+        if self._ec2_client is None:
+            raise RuntimeError(
+                "DefaultEc2InstanceProvider is not entered. Use "
+                "'async with provider:' or rely on "
+                "Ec2SandboxEnvironment.task_init to enter it."
+            )
+        return self._ec2_client
+
+    def _require_ssm(self) -> Any:
+        if self._ssm_client is None:
+            raise RuntimeError(
+                "DefaultEc2InstanceProvider is not entered. Use "
+                "'async with provider:' or rely on "
+                "Ec2SandboxEnvironment.task_init to enter it."
+            )
+        return self._ssm_client
 
     def get_session(self) -> boto3.Session:
         return self._session
@@ -227,7 +322,9 @@ class DefaultEc2InstanceProvider:
                 "register an Ec2InstanceProvider."
             )
 
-        ec2_client = self._session.client("ec2", region_name=cfg.region)
+        ec2 = self._require_ec2()
+        ssm = self._require_ssm()
+
         instance_params: dict[str, Any] = {
             "ImageId": ami_id,
             "InstanceType": instance_type,
@@ -241,11 +338,11 @@ class DefaultEc2InstanceProvider:
         if volume_size is not None:
             instance_params["BlockDeviceMappings"] = [
                 {
-                    "DeviceName": _root_device_name(ec2_client, ami_id),
+                    "DeviceName": await _root_device_name(ec2, ami_id),
                     "Ebs": {"VolumeSize": volume_size},
                 }
             ]
-        response = ec2_client.run_instances(**instance_params, MinCount=1, MaxCount=1)
+        response = await ec2.run_instances(**instance_params, MinCount=1, MaxCount=1)
         instance = response["Instances"][0]
         instance_id = instance["InstanceId"]
 
@@ -253,14 +350,13 @@ class DefaultEc2InstanceProvider:
         # an instance that the sandbox layer will never see — terminate it
         # so the caller doesn't have to know.
         try:
-            waiter = ec2_client.get_waiter("instance_running")
-            waiter.wait(InstanceIds=[instance_id])
+            waiter = ec2.get_waiter("instance_running")
+            await waiter.wait(InstanceIds=[instance_id])
 
-            ssm_client = self._session.client("ssm", region_name=cfg.region)
-            _wait_for_ssm(instance_id, ssm_client)
+            await _wait_for_ssm(instance_id, ssm)
         except BaseException:
             try:
-                ec2_client.terminate_instances(InstanceIds=[instance_id])
+                await ec2.terminate_instances(InstanceIds=[instance_id])
             except Exception as cleanup_err:
                 _logger.warning(
                     "Failed to terminate %s after create_instance error: %s",
@@ -279,12 +375,12 @@ class DefaultEc2InstanceProvider:
         )
 
     async def terminate_instance(self, instance_id: str, region: str) -> None:
-        ec2 = self._session.client("ec2", region_name=region or None)
-        ec2.terminate_instances(InstanceIds=[instance_id])
+        ec2 = self._require_ec2()
+        await ec2.terminate_instances(InstanceIds=[instance_id])
 
     async def find_sandbox_instances(self, region: str) -> list[SandboxInstanceInfo]:
-        ec2 = self._session.client("ec2", region_name=region or None)
-        response = ec2.describe_instances(
+        ec2 = self._require_ec2()
+        response = await ec2.describe_instances(
             Filters=[
                 {"Name": f"tag:{MARKER_TAG_KEY}", "Values": ["true"]},
                 {

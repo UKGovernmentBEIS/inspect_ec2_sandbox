@@ -22,6 +22,16 @@ class _FakeProvider:
     def __init__(self, fail_on: set[str] | None = None) -> None:
         self.terminated: list[tuple[str, str]] = []
         self._fail_on = fail_on or set()
+        self.enter_count = 0
+        self.exit_count = 0
+
+    async def __aenter__(self) -> "_FakeProvider":
+        self.enter_count += 1
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.exit_count += 1
+        return None
 
     async def create_instance(self, **kwargs):  # pragma: no cover (per-test)
         raise NotImplementedError
@@ -51,6 +61,8 @@ async def _seed_environment(
         )
 
     fake_provider.create_instance = create_instance
+    fake_provider.__aenter__ = mock.AsyncMock(return_value=fake_provider)
+    fake_provider.__aexit__ = mock.AsyncMock(return_value=None)
 
     with mock.patch(
         "ec2sandbox._ec2_sandbox_environment.get_ec2_instance_provider",
