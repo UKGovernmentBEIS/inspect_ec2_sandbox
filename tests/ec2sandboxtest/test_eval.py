@@ -1,11 +1,14 @@
 from pathlib import Path
 
+import pytest
 from inspect_ai import Task, eval, task
 from inspect_ai.dataset import Sample
 from inspect_ai.model import ModelOutput, get_model
 from inspect_ai.scorer import includes
 from inspect_ai.solver import basic_agent
 from inspect_ai.tool import bash
+
+pytestmark = pytest.mark.req_aws
 
 CURRENT_DIR = Path(__file__).parent
 

@@ -5,8 +5,6 @@ import pytest
 
 from ec2sandbox.schema import Ec2SandboxEnvironmentConfig
 
-from .helpers import has_aws_creds
-
 
 def env_vars_all() -> dict[str, str]:
     return {
@@ -48,7 +46,7 @@ def test_env_vars(mock_settings_env_vars_all):
     assert config.ami_id == "ami-789"
 
 
-@pytest.mark.skipif(not has_aws_creds(), reason="No AWS credentials found")
+@pytest.mark.req_aws
 def test_find_ami(mock_settings_env_vars_no_ami_id):
     assert mock_settings_env_vars_no_ami_id is not None
     config = Ec2SandboxEnvironmentConfig.from_settings()

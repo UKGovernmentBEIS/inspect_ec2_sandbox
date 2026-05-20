@@ -3,6 +3,7 @@ from importlib.metadata import entry_points
 from typing import Tuple
 
 import boto3
+import pytest
 from inspect_ai.util import SandboxEnvironment
 
 from ec2sandbox._ec2_sandbox_environment import (
@@ -11,6 +12,8 @@ from ec2sandbox._ec2_sandbox_environment import (
     Ec2SandboxEnvironmentConfig,
 )
 from ec2sandbox._instance_provider import get_ec2_instance_provider
+
+pytestmark = pytest.mark.req_aws
 
 
 async def test_cleanup():
@@ -94,8 +97,8 @@ async def _create_environment(
     volume_size: int | None = None,
 ) -> Tuple[Ec2SandboxEnvironmentConfig, dict[str, SandboxEnvironment], str]:
     # Load inspect_ai entry points so any registered Ec2InstanceProvider
-    # (e.g. aisi-inspect-tools' Lambda-backed provider) is installed.
-    # inspect_ai.eval() does this itself, but these tests bypass eval().
+    # is installed. inspect_ai.eval() does this itself, but these tests
+    # bypass eval().
     for ep in entry_points(group="inspect_ai"):
         ep.load()
 

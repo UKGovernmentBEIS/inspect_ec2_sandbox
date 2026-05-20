@@ -8,6 +8,8 @@ from inspect_ai.util._sandbox.self_check import self_check
 
 from ec2sandbox._ec2_sandbox_environment import Ec2SandboxEnvironment
 
+pytestmark = pytest.mark.req_aws
+
 
 @pytest.fixture
 async def ec2_sandbox_environment() -> AsyncGenerator[Ec2SandboxEnvironment, None]:

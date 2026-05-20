@@ -8,7 +8,7 @@ import sys
 from datetime import datetime
 from logging import getLogger
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Union
+from typing import Any, ClassVar, Dict, List, Set, Tuple, Union
 
 import boto3
 from botocore.exceptions import ClientError, WaiterError
@@ -53,6 +53,14 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     TRACE_NAME = "ec2_sandbox_environment"
 
     _session: ClassVar[boto3.Session | None] = None
+
+    # Process-global tracker of provisioned (instance_id, region) tuples.
+    # sample_init registers, successful sample_cleanup deregisters,
+    # task_cleanup sweeps survivors (Ctrl-C, setup-script failures, etc.).
+    # Matches the k8s / proxmox sandbox pattern of a shared tracker — note
+    # that inspect_ai calls task_cleanup with task_name="shutdown" (a phase
+    # marker, not the real task name) so we cannot key by task_name.
+    _tracked_instances: ClassVar[Set[Tuple[str, str]]] = set()
 
     @classmethod
     def set_session(cls, session: boto3.Session) -> None:
@@ -176,6 +184,8 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             result.region,
         )
 
+        cls._tracked_instances.add((result.instance_id, result.region))
+
         environment = Ec2SandboxEnvironment(
             instance_id=result.instance_id,
             region=result.region,
@@ -193,23 +203,20 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         environments: Dict[str, SandboxEnvironment],
         interrupted: bool,
     ) -> None:
+        # Interrupted samples skip per-sample cleanup; task_cleanup will
+        # sweep them up at the end of the task. This matches the docker /
+        # k8s / proxmox sandboxes (lets task_cleanup show its output in
+        # one go, and catches the case where init_sandbox_environments_sample
+        # raised partway through and we still got called with interrupted=True).
         if interrupted:
             return None
 
-        # Cleanup only needs terminate_instance, which doesn't depend on
-        # the direct-EC2 infra fields. A minimal default config is fine
-        # when none was supplied.
-        registered = get_ec2_instance_provider()
-        if registered is not None:
-            provider: Ec2InstanceProvider = registered
-        else:
-            provider = DefaultEc2InstanceProvider(
-                Ec2SandboxEnvironmentConfig(), cls._get_session()
-            )
-
+        provider = cls._resolve_cleanup_provider()
         for env in environments.values():
-            if isinstance(env, Ec2SandboxEnvironment):
-                await provider.terminate_instance(env.instance_id, env.region)
+            if not isinstance(env, Ec2SandboxEnvironment):
+                continue
+            await provider.terminate_instance(env.instance_id, env.region)
+            cls._tracked_instances.discard((env.instance_id, env.region))
         return None
 
     @classmethod
@@ -220,7 +227,51 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
+        # inspect_ai calls this once at the end of a run with task_name="shutdown".
+        # Drain everything still tracked — sample_cleanup(interrupted=False)
+        # will have already removed the ones that succeeded.
+        tracked = list(cls._tracked_instances)
+        cls._tracked_instances.clear()
+        if not tracked:
+            return None
+
+        if not cleanup:
+            # --no-sandbox-cleanup: leave instances running.
+            print(
+                f"\n[yellow]{len(tracked)} EC2 sandbox instance(s) left "
+                f"running (--no-sandbox-cleanup).[/yellow]\n"
+                "Cleanup with: [blue]inspect sandbox cleanup ec2[/blue]\n"
+            )
+            return None
+
+        provider = cls._resolve_cleanup_provider()
+        for instance_id, region in tracked:
+            try:
+                await provider.terminate_instance(instance_id, region)
+            except Exception as e:
+                # Per-item: one bad termination must not block the others.
+                cls.logger.warning(
+                    "task_cleanup: failed to terminate %s in %s: %s",
+                    instance_id,
+                    region,
+                    e,
+                )
         return None
+
+    @classmethod
+    def _resolve_cleanup_provider(cls) -> Ec2InstanceProvider:
+        """Return the provider to use for cleanup-only operations.
+
+        Cleanup only needs ``terminate_instance``, which doesn't depend
+        on the direct-EC2 infra fields, so a minimal default config is
+        fine when no custom provider is registered.
+        """
+        registered = get_ec2_instance_provider()
+        if registered is not None:
+            return registered
+        return DefaultEc2InstanceProvider(
+            Ec2SandboxEnvironmentConfig(), cls._get_session()
+        )
 
     @override
     async def exec(
@@ -284,13 +335,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             print("\n[red]Cleanup by ID not implemented[/red]\n")
             return
 
-        registered = get_ec2_instance_provider()
-        if registered is not None:
-            provider: Ec2InstanceProvider = registered
-        else:
-            provider = DefaultEc2InstanceProvider(
-                Ec2SandboxEnvironmentConfig(), cls._get_session()
-            )
+        provider = cls._resolve_cleanup_provider()
 
         fallback_region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", ""))
         instances = await provider.find_sandbox_instances(fallback_region)
