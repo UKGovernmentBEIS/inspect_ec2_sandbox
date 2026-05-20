@@ -16,6 +16,7 @@ dependencies = [
     "rich>=13.9",
     "platformdirs>=4.3.7",
     "boto3>=1.35.0",
+    "aiobotocore>=2.13.0",
     "websocket-client>=1.8.0",
     "pydantic-settings>=2.10.1",
 ]
@@ -72,7 +73,14 @@ plugins = "pydantic.mypy"
 packages = ["ec2sandbox", "tests.ec2sandboxtest"]
 
 [[tool.mypy.overrides]]
-module = ["boto3", "boto3.*", "botocore", "botocore.*"]
+module = [
+    "boto3",
+    "boto3.*",
+    "botocore",
+    "botocore.*",
+    "aiobotocore",
+    "aiobotocore.*",
+]
 ignore_missing_imports = true
 
 [dependency-groups]

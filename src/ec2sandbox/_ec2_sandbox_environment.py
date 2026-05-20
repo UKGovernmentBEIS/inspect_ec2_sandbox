@@ -1,4 +1,5 @@
 import base64
+import contextlib
 import errno
 import os
 import random
@@ -59,6 +60,12 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     # marker, not the real task name) so we cannot key by task_name.
     _tracked_instances: ClassVar[Set[Tuple[str, str]]] = set()
 
+    # The registered provider, entered via ``__aenter__`` in ``task_init``
+    # and exited via ``__aexit__`` in ``task_cleanup``. Async providers can
+    # use this lifecycle to manage loop-bound resources (aiobotocore /
+    # httpx clients bind to the event loop they're created in).
+    _active_provider: ClassVar[Ec2InstanceProvider | None] = None
+
     @classmethod
     def set_session(cls, session: boto3.Session) -> None:
         """Set the boto3 session used for all AWS operations.
@@ -99,14 +106,25 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     async def task_init(
         cls, task_name: str, config: SandboxEnvironmentConfigType | None
     ) -> None:
-        # If a custom provider supplies a session, adopt it before any
-        # samples run so all runtime boto3 calls share the same credentials.
-        provider = get_ec2_instance_provider()
-        provider_session = get_provider_session(provider)
-        if provider_session is not None:
-            cls.set_session(provider_session)
+        # Enter the registered provider's async lifecycle so it can create
+        # any loop-bound resources (aiobotocore / httpx clients) bound to
+        # the inspect_ai event loop. ``task_cleanup`` exits it.
+        registered = get_ec2_instance_provider()
+        if registered is not None:
+            await registered.__aenter__()
+            cls._active_provider = registered
+
+            # If the provider supplies a sync boto3 session, adopt it
+            # before any samples run so the sandbox's runtime boto3 calls
+            # share the same credentials.
+            provider_session = get_provider_session(registered)
+            if provider_session is not None:
+                cls.set_session(provider_session)
+            else:
+                cls._get_session()
         else:
-            # Ensure the default session is initialised before any samples run.
+            # No custom provider: just initialise the default sync session.
+            # The DefaultEc2InstanceProvider gets entered per sample below.
             cls._get_session()
 
     @classmethod
@@ -115,10 +133,25 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     ) -> tuple[Ec2InstanceProvider, Ec2SandboxEnvironmentConfig]:
         """Return the provider to use plus the config it should consume.
 
-        Custom provider, if registered, takes precedence. Otherwise build
-        a :class:`DefaultEc2InstanceProvider` from ``config`` (or from
-        environment settings when ``config`` is ``None``).
+        Precedence:
+          1. ``cls._active_provider`` if ``task_init`` already entered one;
+          2. the registered custom provider, if any;
+          3. otherwise a fresh :class:`DefaultEc2InstanceProvider` built
+             from ``config`` (or from environment settings when
+             ``config`` is ``None``).
         """
+        if cls._active_provider is not None:
+            # task_init has already entered a (custom) provider. Use it.
+            # Config defaults to minimal — the active provider doesn't need
+            # the direct-EC2 infra fields.
+            if isinstance(config, Ec2SandboxEnvironmentConfig):
+                resolved_config = config
+            elif config is None:
+                resolved_config = Ec2SandboxEnvironmentConfig()
+            else:
+                raise ValueError("config must be a Ec2SandboxEnvironmentConfig")
+            return cls._active_provider, resolved_config
+
         registered = get_ec2_instance_provider()
         if isinstance(config, Ec2SandboxEnvironmentConfig):
             resolved_config = config
@@ -139,6 +172,22 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             DefaultEc2InstanceProvider(resolved_config, cls._get_session()),
             resolved_config,
         )
+
+    @classmethod
+    @contextlib.asynccontextmanager
+    async def _entered(cls, provider: Ec2InstanceProvider) -> Any:
+        """Yield ``provider``, entering it only if it's not already active.
+
+        ``task_init`` may have already entered the registered provider — in
+        that case its lifecycle is owned by ``task_cleanup`` and we must
+        not re-enter or exit it here. For ad-hoc providers (no task_init,
+        e.g. test code or CLI cleanup) we enter and exit them ourselves.
+        """
+        if provider is cls._active_provider:
+            yield provider
+            return
+        async with provider as p:
+            yield p
 
     @classmethod
     @override
@@ -169,12 +218,13 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         extra: dict[str, Any] = {}
         if resolved.volume_size is not None:
             extra["volume_size"] = resolved.volume_size
-        result = await provider.create_instance(
-            instance_type=resolved.instance_type,
-            ami_id=resolved.ami_id,
-            tags=tags,
-            **extra,
-        )
+        async with cls._entered(provider) as p:
+            result = await p.create_instance(
+                instance_type=resolved.instance_type,
+                ami_id=resolved.ami_id,
+                tags=tags,
+                **extra,
+            )
         cls.logger.debug(
             "sample_init: provider returned id=%s region=%s",
             result.instance_id,
@@ -209,11 +259,12 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             return None
 
         provider = cls._resolve_cleanup_provider()
-        for env in environments.values():
-            if not isinstance(env, Ec2SandboxEnvironment):
-                continue
-            await provider.terminate_instance(env.instance_id, env.region)
-            cls._tracked_instances.discard((env.instance_id, env.region))
+        async with cls._entered(provider) as p:
+            for env in environments.values():
+                if not isinstance(env, Ec2SandboxEnvironment):
+                    continue
+                await p.terminate_instance(env.instance_id, env.region)
+                cls._tracked_instances.discard((env.instance_id, env.region))
         return None
 
     @classmethod
@@ -226,43 +277,61 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     ) -> None:
         # inspect_ai calls this once at the end of a run with task_name="shutdown".
         # Drain everything still tracked — sample_cleanup(interrupted=False)
-        # will have already removed the ones that succeeded.
-        tracked = list(cls._tracked_instances)
-        cls._tracked_instances.clear()
-        if not tracked:
-            return None
+        # will have already removed the ones that succeeded. We do the
+        # cleanup work first, then exit the active provider (if task_init
+        # entered one) in a finally so its loop-bound clients are released
+        # even if termination raises.
+        try:
+            tracked = list(cls._tracked_instances)
+            cls._tracked_instances.clear()
+            if not tracked:
+                return None
 
-        if not cleanup:
-            # --no-sandbox-cleanup: leave instances running.
-            print(
-                f"\n[yellow]{len(tracked)} EC2 sandbox instance(s) left "
-                f"running (--no-sandbox-cleanup).[/yellow]\n"
-                "Cleanup with: [blue]inspect sandbox cleanup ec2[/blue]\n"
-            )
-            return None
-
-        provider = cls._resolve_cleanup_provider()
-        for instance_id, region in tracked:
-            try:
-                await provider.terminate_instance(instance_id, region)
-            except Exception as e:
-                # Per-item: one bad termination must not block the others.
-                cls.logger.warning(
-                    "task_cleanup: failed to terminate %s in %s: %s",
-                    instance_id,
-                    region,
-                    e,
+            if not cleanup:
+                # --no-sandbox-cleanup: leave instances running.
+                print(
+                    f"\n[yellow]{len(tracked)} EC2 sandbox instance(s) left "
+                    f"running (--no-sandbox-cleanup).[/yellow]\n"
+                    "Cleanup with: [blue]inspect sandbox cleanup ec2[/blue]\n"
                 )
+                return None
+
+            provider = cls._resolve_cleanup_provider()
+            async with cls._entered(provider) as p:
+                for instance_id, region in tracked:
+                    try:
+                        await p.terminate_instance(instance_id, region)
+                    except Exception as e:
+                        # Per-item: one bad termination must not block the
+                        # others.
+                        cls.logger.warning(
+                            "task_cleanup: failed to terminate %s in %s: %s",
+                            instance_id,
+                            region,
+                            e,
+                        )
+        finally:
+            active = cls._active_provider
+            if active is not None:
+                cls._active_provider = None
+                try:
+                    await active.__aexit__(None, None, None)
+                except Exception as e:
+                    cls.logger.warning("task_cleanup: provider __aexit__ raised: %s", e)
         return None
 
     @classmethod
     def _resolve_cleanup_provider(cls) -> Ec2InstanceProvider:
         """Return the provider to use for cleanup-only operations.
 
+        Honors ``cls._active_provider`` first, then the registered
+        provider, then a minimal :class:`DefaultEc2InstanceProvider`.
         Cleanup only needs ``terminate_instance``, which doesn't depend
         on the direct-EC2 infra fields, so a minimal default config is
         fine when no custom provider is registered.
         """
+        if cls._active_provider is not None:
+            return cls._active_provider
         registered = get_ec2_instance_provider()
         if registered is not None:
             return registered
@@ -333,32 +402,33 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             return
 
         provider = cls._resolve_cleanup_provider()
-
         fallback_region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", ""))
-        instances = await provider.find_sandbox_instances(fallback_region)
 
-        if not instances:
-            print("\nNo EC2 sandbox instances found to clean up.\n")
-            return
+        async with cls._entered(provider) as p:
+            instances = await p.find_sandbox_instances(fallback_region)
 
-        vms_table = Table(
-            box=box.SQUARE,
-            show_lines=False,
-            title_style="bold",
-            title_justify="left",
-        )
-        vms_table.add_column("Instance ID")
-        vms_table.add_column("Instance Name")
-        for inst in instances:
-            vms_table.add_row(inst.instance_id, inst.name)
-        print(vms_table)
+            if not instances:
+                print("\nNo EC2 sandbox instances found to clean up.\n")
+                return
 
-        if not cls._confirm_cleanup():
-            return
+            vms_table = Table(
+                box=box.SQUARE,
+                show_lines=False,
+                title_style="bold",
+                title_justify="left",
+            )
+            vms_table.add_column("Instance ID")
+            vms_table.add_column("Instance Name")
+            for inst in instances:
+                vms_table.add_row(inst.instance_id, inst.name)
+            print(vms_table)
 
-        for inst in instances:
-            region = inst.region or fallback_region
-            await provider.terminate_instance(inst.instance_id, region)
+            if not cls._confirm_cleanup():
+                return
+
+            for inst in instances:
+                region = inst.region or fallback_region
+                await p.terminate_instance(inst.instance_id, region)
 
     @staticmethod
     def _confirm_cleanup() -> bool:
