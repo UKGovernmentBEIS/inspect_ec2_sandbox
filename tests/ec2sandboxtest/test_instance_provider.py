@@ -63,6 +63,24 @@ async def test_create_instance_no_volume_size_omits_block_device_mappings():
 
 
 @pytest.mark.asyncio
+async def test_create_instance_terminates_on_post_launch_failure():
+    """If the post-launch wait raises, the partially-launched instance is terminated."""
+    provider, ec2_client = _make_provider_with_mocks(_make_config())
+
+    waiter = ec2_client.get_waiter.return_value
+    waiter.wait.side_effect = RuntimeError("instance-running timeout")
+
+    with pytest.raises(RuntimeError, match="instance-running timeout"):
+        await provider.create_instance(
+            instance_type="t3a.micro",
+            ami_id="ami-123",
+            tags=[("Name", "x")],
+        )
+
+    ec2_client.terminate_instances.assert_called_once_with(InstanceIds=["i-abc"])
+
+
+@pytest.mark.asyncio
 async def test_create_instance_with_volume_size_sets_block_device_mappings():
     provider, ec2_client = _make_provider_with_mocks(_make_config(volume_size=100))
 

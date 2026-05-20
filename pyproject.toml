@@ -27,6 +27,10 @@ dependencies = [
 asyncio_mode = "auto"
 pythonpath = ["tests"]
 testpaths = ["tests/**/*.py"]
+addopts = ["--strict-markers"]
+markers = [
+    "req_aws: marks tests as requiring real AWS access (deselect with '-m \"not req_aws\"')",
+]
 
 [build-system]
 requires = ["hatchling"]

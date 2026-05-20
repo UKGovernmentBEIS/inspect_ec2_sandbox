@@ -249,11 +249,25 @@ class DefaultEc2InstanceProvider:
         instance = response["Instances"][0]
         instance_id = instance["InstanceId"]
 
-        waiter = ec2_client.get_waiter("instance_running")
-        waiter.wait(InstanceIds=[instance_id])
+        # If anything between here and a successful return raises, we own
+        # an instance that the sandbox layer will never see — terminate it
+        # so the caller doesn't have to know.
+        try:
+            waiter = ec2_client.get_waiter("instance_running")
+            waiter.wait(InstanceIds=[instance_id])
 
-        ssm_client = self._session.client("ssm", region_name=cfg.region)
-        _wait_for_ssm(instance_id, ssm_client)
+            ssm_client = self._session.client("ssm", region_name=cfg.region)
+            _wait_for_ssm(instance_id, ssm_client)
+        except BaseException:
+            try:
+                ec2_client.terminate_instances(InstanceIds=[instance_id])
+            except Exception as cleanup_err:
+                _logger.warning(
+                    "Failed to terminate %s after create_instance error: %s",
+                    instance_id,
+                    cleanup_err,
+                )
+            raise
 
         assert cfg.region is not None  # validated above
         assert cfg.s3_bucket is not None  # validated above
