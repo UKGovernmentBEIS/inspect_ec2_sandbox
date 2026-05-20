@@ -30,6 +30,10 @@ pytestmark = pytest.mark.req_aws
 REGION = "eu-west-2"
 
 
+def _tracked_ids() -> set[str]:
+    return {p.instance_id for p in Ec2SandboxEnvironment._tracked_instances}
+
+
 async def _provision(
     config: Ec2SandboxEnvironmentConfig,
     task_name: str,
@@ -47,7 +51,7 @@ async def test_happy_path_terminates_via_sample_cleanup(
     """sample_cleanup(interrupted=False) terminates the instance and clears the tracker."""  # noqa: E501
     envs, inst_id = await _provision(ec2_config, "test_happy")
     try:
-        assert (inst_id, REGION) in Ec2SandboxEnvironment._tracked_instances
+        assert inst_id in _tracked_ids()
 
         await Ec2SandboxEnvironment.sample_cleanup(
             task_name="test_happy",
@@ -56,7 +60,7 @@ async def test_happy_path_terminates_via_sample_cleanup(
             interrupted=False,
         )
 
-        assert (inst_id, REGION) not in Ec2SandboxEnvironment._tracked_instances
+        assert inst_id not in _tracked_ids()
         assert wait_until_terminated(inst_id) in ("terminated", "shutting-down", None)
     finally:
         # Defensive: even if assertions failed, don't leak the instance.
@@ -80,14 +84,14 @@ async def test_interrupted_sample_cleanup_skips_then_task_cleanup_sweeps(
 
         time.sleep(5)
         assert instance_state(inst_id) in ("pending", "running")
-        assert (inst_id, REGION) in Ec2SandboxEnvironment._tracked_instances
+        assert inst_id in _tracked_ids()
 
         # inspect_ai always calls task_cleanup with task_name="shutdown".
         await Ec2SandboxEnvironment.task_cleanup(
             task_name="shutdown", config=ec2_config, cleanup=True
         )
 
-        assert (inst_id, REGION) not in Ec2SandboxEnvironment._tracked_instances
+        assert inst_id not in _tracked_ids()
         assert wait_until_terminated(inst_id) in ("terminated", "shutting-down", None)
     finally:
         if instance_state(inst_id) in ("pending", "running"):
@@ -124,9 +128,7 @@ async def test_multiple_samples_one_interrupted(
     envs_a, inst_a = await _provision(ec2_config, "test_multi")
     envs_b, inst_b = await _provision(ec2_config, "test_multi")
     try:
-        assert {(inst_a, REGION), (inst_b, REGION)}.issubset(
-            Ec2SandboxEnvironment._tracked_instances
-        )
+        assert {inst_a, inst_b}.issubset(_tracked_ids())
 
         # Sample A succeeds.
         await Ec2SandboxEnvironment.sample_cleanup(
@@ -135,8 +137,8 @@ async def test_multiple_samples_one_interrupted(
             environments=envs_a,
             interrupted=False,
         )
-        assert (inst_a, REGION) not in Ec2SandboxEnvironment._tracked_instances
-        assert (inst_b, REGION) in Ec2SandboxEnvironment._tracked_instances
+        assert inst_a not in _tracked_ids()
+        assert inst_b in _tracked_ids()
 
         # Sample B interrupted.
         await Ec2SandboxEnvironment.sample_cleanup(
@@ -145,14 +147,14 @@ async def test_multiple_samples_one_interrupted(
             environments=envs_b,
             interrupted=True,
         )
-        assert (inst_b, REGION) in Ec2SandboxEnvironment._tracked_instances
+        assert inst_b in _tracked_ids()
 
         # task_cleanup sweeps the leftover.
         await Ec2SandboxEnvironment.task_cleanup(
             task_name="shutdown", config=ec2_config, cleanup=True
         )
 
-        assert (inst_b, REGION) not in Ec2SandboxEnvironment._tracked_instances
+        assert inst_b not in _tracked_ids()
         assert wait_until_terminated(inst_a) in ("terminated", "shutting-down", None)
         assert wait_until_terminated(inst_b) in ("terminated", "shutting-down", None)
     finally:

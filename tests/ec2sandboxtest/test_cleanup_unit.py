@@ -31,7 +31,7 @@ class _FakeProvider:
             raise RuntimeError(f"simulated terminate failure for {instance_id}")
         self.terminated.append((instance_id, region))
 
-    async def find_sandbox_instances(self, region):  # pragma: no cover
+    async def find_sandbox_instances(self):  # pragma: no cover
         return []
 
 
@@ -61,9 +61,15 @@ async def _seed_environment(
         )
 
 
+def _provisioned(instance_id: str, region: str = "eu-west-2") -> ProvisionedInstance:
+    return ProvisionedInstance(
+        instance_id=instance_id, region=region, s3_bucket="bucket-1"
+    )
+
+
 async def test_sample_init_registers_instance_in_tracker():
     await _seed_environment("task_a", instance_id="i-111")
-    assert Ec2SandboxEnvironment._tracked_instances == {("i-111", "eu-west-2")}
+    assert Ec2SandboxEnvironment._tracked_instances == {_provisioned("i-111")}
 
 
 async def test_sample_cleanup_interrupted_leaves_tracker_intact():
@@ -79,7 +85,7 @@ async def test_sample_cleanup_interrupted_leaves_tracker_intact():
         )
 
     assert terminator.terminated == []
-    assert Ec2SandboxEnvironment._tracked_instances == {("i-111", "eu-west-2")}
+    assert Ec2SandboxEnvironment._tracked_instances == {_provisioned("i-111")}
 
 
 async def test_sample_cleanup_success_terminates_and_deregisters():
@@ -107,8 +113,8 @@ async def test_task_cleanup_sweeps_remaining_tracked_instances():
     await _seed_environment("task_a", instance_id="i-111")
     await _seed_environment("task_b", instance_id="i-222")
     assert Ec2SandboxEnvironment._tracked_instances == {
-        ("i-111", "eu-west-2"),
-        ("i-222", "eu-west-2"),
+        _provisioned("i-111"),
+        _provisioned("i-222"),
     }
 
     terminator = _FakeProvider()
@@ -195,4 +201,4 @@ async def test_sample_cleanup_only_deregisters_its_own_environments():
         )
 
     assert terminator.terminated == [("i-aaa", "eu-west-2")]
-    assert Ec2SandboxEnvironment._tracked_instances == {("i-bbb", "eu-west-2")}
+    assert Ec2SandboxEnvironment._tracked_instances == {_provisioned("i-bbb")}

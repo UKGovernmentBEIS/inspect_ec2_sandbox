@@ -9,7 +9,7 @@ from datetime import datetime
 from importlib.metadata import entry_points
 from logging import getLogger
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Set, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Set, Union
 
 import boto3
 from botocore.exceptions import ClientError, WaiterError
@@ -32,6 +32,7 @@ from ec2sandbox._instance_provider import (
     MARKER_TAG_KEY,
     DefaultEc2InstanceProvider,
     Ec2InstanceProvider,
+    ProvisionedInstance,
     get_ec2_instance_provider,
     get_provider_session,
 )
@@ -57,13 +58,13 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
     _providers_loaded: ClassVar[bool] = False
 
-    # Process-global tracker of provisioned (instance_id, region) tuples.
+    # Process-global tracker of provisioned instances.
     # sample_init registers, successful sample_cleanup deregisters,
     # task_cleanup sweeps survivors (Ctrl-C, setup-script failures, etc.).
     # Matches the k8s / proxmox sandbox pattern of a shared tracker — note
     # that inspect_ai calls task_cleanup with task_name="shutdown" (a phase
     # marker, not the real task name) so we cannot key by task_name.
-    _tracked_instances: ClassVar[Set[Tuple[str, str]]] = set()
+    _tracked_instances: ClassVar[Set[ProvisionedInstance]] = set()
 
     @classmethod
     def set_session(cls, session: boto3.Session) -> None:
@@ -100,25 +101,22 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
                     "failed loading inspect_ai entry point %s", ep.value, exc_info=True
                 )
 
-    def __init__(
-        self,
-        instance_id: str,
-        region: str,
-        s3_bucket: str,
-        s3_key_prefix: str = "",
-    ):
-        self.instance_id = instance_id
-        self.region = region
-        self.s3_bucket = s3_bucket
-        self.s3_key_prefix = s3_key_prefix
+    def __init__(self, provisioned: ProvisionedInstance):
+        self.provisioned = provisioned
+        # Flat aliases so the rest of the class (and downstream readers)
+        # don't have to reach through self.provisioned for every call.
+        self.instance_id = provisioned.instance_id
+        self.region = provisioned.region
+        self.s3_bucket = provisioned.s3_bucket
+        self.s3_key_prefix = provisioned.s3_key_prefix
         session = self._get_session()
-        self.ssm_client = session.client("ssm", region_name=region)
+        self.ssm_client = session.client("ssm", region_name=self.region)
         self.s3_client = session.client(
             "s3",
-            region_name=region,
-            endpoint_url=f"https://s3.{region}.amazonaws.com",
+            region_name=self.region,
+            endpoint_url=f"https://s3.{self.region}.amazonaws.com",
         )
-        self.ec2_client = session.client("ec2", region_name=region)
+        self.ec2_client = session.client("ec2", region_name=self.region)
 
     @classmethod
     @override
@@ -209,15 +207,8 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             result.region,
         )
 
-        cls._tracked_instances.add((result.instance_id, result.region))
-
-        environment = Ec2SandboxEnvironment(
-            instance_id=result.instance_id,
-            region=result.region,
-            s3_bucket=result.s3_bucket,
-            s3_key_prefix=result.s3_key_prefix,
-        )
-        return {"default": environment}
+        cls._tracked_instances.add(result)
+        return {"default": Ec2SandboxEnvironment(result)}
 
     @classmethod
     @override
@@ -241,7 +232,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             if not isinstance(env, Ec2SandboxEnvironment):
                 continue
             await provider.terminate_instance(env.instance_id, env.region)
-            cls._tracked_instances.discard((env.instance_id, env.region))
+            cls._tracked_instances.discard(env.provisioned)
         return None
 
     @classmethod
@@ -270,15 +261,15 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             return None
 
         provider, _ = cls._resolve_provider(config)
-        for instance_id, region in tracked:
+        for inst in tracked:
             try:
-                await provider.terminate_instance(instance_id, region)
+                await provider.terminate_instance(inst.instance_id, inst.region)
             except Exception as e:
                 # Per-item: one bad termination must not block the others.
                 cls.logger.warning(
                     "task_cleanup: failed to terminate %s in %s: %s",
-                    instance_id,
-                    region,
+                    inst.instance_id,
+                    inst.region,
                     e,
                 )
         return None
@@ -347,8 +338,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
         provider, _ = cls._resolve_provider(None)
 
-        fallback_region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", ""))
-        instances = await provider.find_sandbox_instances(fallback_region)
+        instances = await provider.find_sandbox_instances()
 
         if not instances:
             print("\nNo EC2 sandbox instances found to clean up.\n")
@@ -370,8 +360,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             return
 
         for inst in instances:
-            region = inst.region or fallback_region
-            await provider.terminate_instance(inst.instance_id, region)
+            await provider.terminate_instance(inst.instance_id, inst.region)
 
     @staticmethod
     def _confirm_cleanup() -> bool:

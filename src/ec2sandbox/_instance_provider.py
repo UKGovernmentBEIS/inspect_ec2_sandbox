@@ -15,6 +15,7 @@ sandbox is used.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
@@ -35,12 +36,13 @@ _logger = logging.getLogger(__name__)
 MARKER_TAG_KEY = "inspect_sandbox"
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProvisionedInstance:
     """Result of provisioning an EC2 sandbox instance.
 
     Contains everything the :class:`Ec2SandboxEnvironment` needs for
     runtime operations (exec / read_file / write_file via SSM + S3).
+    Frozen so it can be used as a set element by the cleanup tracker.
     """
 
     instance_id: str
@@ -49,7 +51,7 @@ class ProvisionedInstance:
     s3_key_prefix: str = ""
 
 
-@dataclass
+@dataclass(frozen=True)
 class SandboxInstanceInfo:
     """Metadata for a discovered sandbox instance (used by cli_cleanup)."""
 
@@ -93,10 +95,15 @@ class Ec2InstanceProvider(Protocol):
         ...
 
     async def terminate_instance(self, instance_id: str, region: str) -> None:
-        """Terminate an EC2 instance."""
+        """Terminate an EC2 instance.
+
+        ``region`` is the instance's own region (from ``create_instance``'s
+        :class:`ProvisionedInstance`); a control plane in a different
+        region (e.g. a Lambda) uses it to route the call.
+        """
         ...
 
-    async def find_sandbox_instances(self, region: str) -> list[SandboxInstanceInfo]:
+    async def find_sandbox_instances(self) -> list[SandboxInstanceInfo]:
         """Find running sandbox instances for interactive cleanup."""
         ...
 
@@ -203,7 +210,8 @@ class DefaultEc2InstanceProvider:
     etc.) from the supplied :class:`Ec2SandboxEnvironmentConfig` at the
     point they are needed — ``create_instance`` requires the full set,
     while ``terminate_instance`` and ``find_sandbox_instances`` only
-    need the supplied ``region``.
+    need a region (the instance's own region for terminate; the
+    configured region for find).
     """
 
     # Process-global Ubuntu 24.04 AMI cache keyed on region. Canonical's
@@ -315,7 +323,14 @@ class DefaultEc2InstanceProvider:
         ec2 = self._session.client("ec2", region_name=region or None)
         ec2.terminate_instances(InstanceIds=[instance_id])
 
-    async def find_sandbox_instances(self, region: str) -> list[SandboxInstanceInfo]:
+    async def find_sandbox_instances(self) -> list[SandboxInstanceInfo]:
+        # cli_cleanup builds this provider with an empty config (no region),
+        # so fall back to AWS_REGION / AWS_DEFAULT_REGION as the session does.
+        region = (
+            self._config.region
+            or os.getenv("AWS_REGION")
+            or os.getenv("AWS_DEFAULT_REGION")
+        )
         ec2 = self._session.client("ec2", region_name=region or None)
         response = ec2.describe_instances(
             Filters=[
@@ -338,7 +353,7 @@ class DefaultEc2InstanceProvider:
                     SandboxInstanceInfo(
                         instance_id=instance["InstanceId"],
                         name=name,
-                        region=region,
+                        region=region or "",
                     )
                 )
         return results
