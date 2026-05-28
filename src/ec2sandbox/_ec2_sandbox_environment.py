@@ -129,9 +129,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             resolved_config = (
                 Ec2SandboxEnvironmentConfig()
                 if registered is not None
-                else Ec2SandboxEnvironmentConfig.from_settings(
-                    session=cls._get_session()
-                )
+                else Ec2SandboxEnvironmentConfig.from_settings()
             )
         else:
             raise ValueError("config must be a Ec2SandboxEnvironmentConfig")
@@ -211,7 +209,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         if interrupted:
             return None
 
-        provider = cls._resolve_cleanup_provider()
+        provider, _ = cls._resolve_provider(config)
         for env in environments.values():
             if not isinstance(env, Ec2SandboxEnvironment):
                 continue
@@ -244,7 +242,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             )
             return None
 
-        provider = cls._resolve_cleanup_provider()
+        provider, _ = cls._resolve_provider(config)
         for instance_id, region in tracked:
             try:
                 await provider.terminate_instance(instance_id, region)
@@ -257,21 +255,6 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
                     e,
                 )
         return None
-
-    @classmethod
-    def _resolve_cleanup_provider(cls) -> Ec2InstanceProvider:
-        """Return the provider to use for cleanup-only operations.
-
-        Cleanup only needs ``terminate_instance``, which doesn't depend
-        on the direct-EC2 infra fields, so a minimal default config is
-        fine when no custom provider is registered.
-        """
-        registered = get_ec2_instance_provider()
-        if registered is not None:
-            return registered
-        return DefaultEc2InstanceProvider(
-            Ec2SandboxEnvironmentConfig(), cls._get_session()
-        )
 
     @override
     async def exec(
@@ -335,7 +318,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             print("\n[red]Cleanup by ID not implemented[/red]\n")
             return
 
-        provider = cls._resolve_cleanup_provider()
+        provider, _ = cls._resolve_provider(None)
 
         fallback_region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", ""))
         instances = await provider.find_sandbox_instances(fallback_region)

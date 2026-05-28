@@ -8,7 +8,6 @@ This module provides configuration classes and utility functions for defining
 import os
 from typing import Optional, Tuple
 
-import boto3
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -58,7 +57,9 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
     # Shared fields — used by both the direct-EC2 path and any custom
     # Ec2InstanceProvider. Have sensible defaults.
     instance_type: str = "t3a.large"
-    ami_id: str = ""  # empty -> provider chooses or from_settings resolves
+    # empty -> the provider chooses (DefaultEc2InstanceProvider resolves the
+    # current Ubuntu 24.04 AMI on first create_instance call).
+    ami_id: str = ""
     extra_tags: Tuple[Tuple[str, str], ...] = ()
     s3_key_prefix: str = ""
     volume_size: Optional[int] = None
@@ -75,12 +76,10 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
     s3_bucket: Optional[str] = None
 
     @classmethod
-    def from_settings(cls, session: "boto3.Session | None" = None, **kwargs):
+    def from_settings(cls, **kwargs):
         """Create an instance from environment settings with optional overrides.
 
         Args:
-            session: Optional boto3 session for AWS calls (e.g. AMI lookup).
-                Falls back to ``boto3.Session()`` when not provided.
             **kwargs: Field-level overrides applied on top of env-var settings.
         """
         settings = _Ec2ExistingInfraSettings()
@@ -111,8 +110,11 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
             )
         params["region"] = region
 
+        # AMI resolution is deferred to DefaultEc2InstanceProvider.create_instance
+        # so that callers who only need terminate/find don't pay for an SSM
+        # AMI lookup just to construct a config.
         if params["ami_id"] is None:
-            params["ami_id"] = _find_ami_ubu24(region, session=session)
+            params["ami_id"] = ""
 
         if params["instance_type"] is None:
             params["instance_type"] = "t3a.large"
@@ -127,22 +129,3 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
             )
 
         return cls(**params)
-
-
-def _find_ami_ubu24(region: str, session: "boto3.Session | None" = None) -> str:
-    """Look up the current Ubuntu 24.04 AMI via SSM Parameter Store."""
-    if session is None:
-        session = boto3.Session()
-    ssm_client = session.client("ssm", region_name=region)
-
-    # see https://documentation.ubuntu.com/aws/aws-how-to/instances/find-ubuntu-images/
-    response = ssm_client.get_parameters(
-        Names=[
-            "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
-        ]
-    )
-
-    if not response["Parameters"]:
-        raise ValueError("Could not find Ubuntu 24.04 AMI ID in SSM Parameter Store")
-
-    return response["Parameters"][0]["Value"]

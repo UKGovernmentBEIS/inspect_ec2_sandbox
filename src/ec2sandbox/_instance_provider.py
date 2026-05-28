@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 import boto3
 from botocore.exceptions import ClientError  # noqa: F401  (re-exported for convenience)
@@ -164,6 +164,21 @@ def _root_device_name(ec2_client: Any, ami_id: str) -> str:
     return images[0]["RootDeviceName"]
 
 
+def _find_ami_ubu24(ssm_client: Any) -> str:
+    """Look up the current Ubuntu 24.04 AMI via SSM Parameter Store."""
+    # see https://documentation.ubuntu.com/aws/aws-how-to/instances/find-ubuntu-images/
+    response = ssm_client.get_parameters(
+        Names=[
+            "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+        ]
+    )
+
+    if not response["Parameters"]:
+        raise ValueError("Could not find Ubuntu 24.04 AMI ID in SSM Parameter Store")
+
+    return response["Parameters"][0]["Value"]
+
+
 @retry(stop=stop_after_attempt(20), wait=wait_fixed(30))
 def _wait_for_ssm(instance_id: str, ssm_client: Any) -> bool:
     """Wait for SSM agent to come online on the given instance."""
@@ -191,6 +206,12 @@ class DefaultEc2InstanceProvider:
     need the supplied ``region``.
     """
 
+    # Process-global Ubuntu 24.04 AMI cache keyed on region. Canonical's
+    # published AMI ID is the same regardless of session, so a per-region
+    # entry is safe; the configured ``self._session`` is still used for
+    # the actual SSM call on cache miss.
+    _ami_cache: ClassVar[dict[str, str]] = {}
+
     def __init__(
         self,
         config: "Ec2SandboxEnvironmentConfig",
@@ -201,6 +222,13 @@ class DefaultEc2InstanceProvider:
 
     def get_session(self) -> boto3.Session:
         return self._session
+
+    def _resolve_ubu24_ami(self, region: str) -> str:
+        cache = DefaultEc2InstanceProvider._ami_cache
+        if region not in cache:
+            ssm_client = self._session.client("ssm", region_name=region)
+            cache[region] = _find_ami_ubu24(ssm_client)
+        return cache[region]
 
     async def create_instance(
         self,
@@ -216,7 +244,6 @@ class DefaultEc2InstanceProvider:
             "subnet_id": cfg.subnet_id,
             "instance_profile": cfg.instance_profile,
             "s3_bucket": cfg.s3_bucket,
-            "ami_id": ami_id,
         }
         missing = [name for name, value in required.items() if not value]
         if missing:
@@ -226,6 +253,10 @@ class DefaultEc2InstanceProvider:
                 "Either populate them (typically via from_settings) or "
                 "register an Ec2InstanceProvider."
             )
+
+        if not ami_id:
+            assert cfg.region is not None  # validated above
+            ami_id = self._resolve_ubu24_ami(cfg.region)
 
         ec2_client = self._session.client("ec2", region_name=cfg.region)
         instance_params: dict[str, Any] = {

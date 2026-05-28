@@ -61,7 +61,7 @@ async def test_happy_path_terminates_via_sample_cleanup(
     finally:
         # Defensive: even if assertions failed, don't leak the instance.
         if instance_state(inst_id) in ("pending", "running"):
-            provider = Ec2SandboxEnvironment._resolve_cleanup_provider()
+            provider, _ = Ec2SandboxEnvironment._resolve_provider(ec2_config)
             await provider.terminate_instance(inst_id, REGION)
 
 
@@ -91,7 +91,7 @@ async def test_interrupted_sample_cleanup_skips_then_task_cleanup_sweeps(
         assert wait_until_terminated(inst_id) in ("terminated", "shutting-down", None)
     finally:
         if instance_state(inst_id) in ("pending", "running"):
-            provider = Ec2SandboxEnvironment._resolve_cleanup_provider()
+            provider, _ = Ec2SandboxEnvironment._resolve_provider(ec2_config)
             await provider.terminate_instance(inst_id, REGION)
 
 
@@ -113,7 +113,7 @@ async def test_task_cleanup_respects_no_sandbox_cleanup(
         assert "no-sandbox-cleanup" in captured.out.lower()
         assert "inspect sandbox cleanup ec2" in captured.out
     finally:
-        provider = Ec2SandboxEnvironment._resolve_cleanup_provider()
+        provider, _ = Ec2SandboxEnvironment._resolve_provider(ec2_config)
         await provider.terminate_instance(inst_id, REGION)
 
 
@@ -156,7 +156,7 @@ async def test_multiple_samples_one_interrupted(
         assert wait_until_terminated(inst_a) in ("terminated", "shutting-down", None)
         assert wait_until_terminated(inst_b) in ("terminated", "shutting-down", None)
     finally:
-        provider = Ec2SandboxEnvironment._resolve_cleanup_provider()
+        provider, _ = Ec2SandboxEnvironment._resolve_provider(ec2_config)
         for inst in (inst_a, inst_b):
             if instance_state(inst) in ("pending", "running"):
                 await provider.terminate_instance(inst, REGION)
