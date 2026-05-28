@@ -209,9 +209,7 @@ class DefaultEc2InstanceProvider:
     # Process-global Ubuntu 24.04 AMI cache keyed on region. Canonical's
     # published AMI ID is the same regardless of session, so a per-region
     # entry is safe; the configured ``self._session`` is still used for
-    # the actual SSM call on cache miss. Intentionally never invalidated:
-    # the process is short-lived (one eval run) and pinning a single AMI
-    # across all samples in a run is desirable.
+    # the actual SSM call on cache miss.
     _ami_cache: ClassVar[dict[str, str]] = {}
 
     def __init__(
