@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import errno
 import os
@@ -142,18 +143,11 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     ) -> dict[str, SandboxEnvironment]:
         provider, resolved = cls._resolve_provider(config)
 
-        tags: list[tuple[str, str]] = list(resolved.extra_tags) + [
-            ("Name", f"inspect_ec2_sandbox_{task_name}"),
+        base_tags: list[tuple[str, str]] = list(resolved.extra_tags) + [
             ("inspect_task", task_name),
             (MARKER_TAG_KEY, "true"),
         ]
 
-        cls.logger.debug(
-            "sample_init: provider=%s type=%s ami=%s",
-            type(provider).__name__,
-            resolved.instance_type,
-            resolved.ami_id,
-        )
         # Pass volume_size only when set, so providers that pre-date this
         # parameter keep working unchanged. A caller that sets volume_size
         # against such a provider will get a clear TypeError pointing at
@@ -161,25 +155,69 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         extra: dict[str, Any] = {}
         if resolved.volume_size is not None:
             extra["volume_size"] = resolved.volume_size
-        result = await provider.create_instance(
-            instance_type=resolved.instance_type,
-            ami_id=resolved.ami_id,
-            tags=tags,
-            **extra,
-        )
+
+        # Empty sandbox_names keeps the original single-environment behaviour;
+        # the dict key stays "default" and the Name tag is unchanged.
+        names = resolved.sandbox_names or ("default",)
+        multi = bool(resolved.sandbox_names)
+
         cls.logger.debug(
-            "sample_init: provider returned id=%s region=%s",
-            result.instance_id,
-            result.region,
+            "sample_init: provider=%s type=%s ami=%s names=%s",
+            type(provider).__name__,
+            resolved.instance_type,
+            resolved.ami_id,
+            names,
         )
 
-        environment = Ec2SandboxEnvironment(
-            instance_id=result.instance_id,
-            region=result.region,
-            s3_bucket=result.s3_bucket,
-            s3_key_prefix=result.s3_key_prefix,
+        async def create(name: str) -> tuple[str, Ec2SandboxEnvironment]:
+            name_tag = (
+                f"inspect_ec2_sandbox_{task_name}_{name}"
+                if multi
+                else f"inspect_ec2_sandbox_{task_name}"
+            )
+            tags = [("Name", name_tag), *base_tags]
+            result = await provider.create_instance(
+                instance_type=resolved.instance_type,
+                ami_id=resolved.ami_id,
+                tags=tags,
+                **extra,
+            )
+            cls.logger.debug(
+                "sample_init: provider returned name=%s id=%s region=%s",
+                name,
+                result.instance_id,
+                result.region,
+            )
+            return name, Ec2SandboxEnvironment(
+                instance_id=result.instance_id,
+                region=result.region,
+                s3_bucket=result.s3_bucket,
+                s3_key_prefix=result.s3_key_prefix,
+            )
+
+        results = await asyncio.gather(
+            *(create(name) for name in names), return_exceptions=True
         )
-        return {"default": environment}
+
+        # If any instance failed to come up, terminate the ones that did so
+        # they don't leak (sample_cleanup only sees what we return here).
+        succeeded = [r for r in results if not isinstance(r, BaseException)]
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            for _, env in succeeded:
+                try:
+                    await provider.terminate_instance(env.instance_id, env.region)
+                except Exception:
+                    cls.logger.warning(
+                        "Failed to terminate instance %s while rolling back a "
+                        "partial sample_init failure",
+                        env.instance_id,
+                        exc_info=True,
+                    )
+            raise errors[0]
+
+        # dict() preserves order, so names[0] is the default environment.
+        return dict(succeeded)
 
     @classmethod
     @override
