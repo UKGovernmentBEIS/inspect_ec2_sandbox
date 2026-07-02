@@ -40,6 +40,8 @@ from ec2sandbox.schema import Ec2SandboxEnvironmentConfig
 # ``MARKER_TAG_KEY`` from this module.
 __all__ = ["Ec2SandboxEnvironment", "Ec2SandboxEnvironmentConfig", "MARKER_TAG_KEY"]
 
+DEFAULT_SANDBOX_TIMEOUT_SECONDS = 3600
+WAITER_DELAY_SECONDS = 1
 
 @sandboxenv(name="ec2")
 class Ec2SandboxEnvironment(SandboxEnvironment):
@@ -265,7 +267,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
         params: dict[str, Any] = {
             "commands": commands,
-            "executionTimeout": [str(timeout or 3600)],
+            "executionTimeout": [str(timeout or DEFAULT_SANDBOX_TIMEOUT_SECONDS)],
         }
 
         s3_key_prefix = self._s3_key_prefix("exec")
@@ -398,10 +400,14 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             # Wait for command completion
             waiter = self.ssm_client.get_waiter("command_executed")
 
+            # Calculate the number of attempts based on timeout and waiter delay (both in seconds)
+            max_attempts = (
+                timeout or DEFAULT_SANDBOX_TIMEOUT_SECONDS
+            ) // WAITER_DELAY_SECONDS
             waiter.wait(
                 CommandId=command_id,
                 InstanceId=self.instance_id,
-                WaiterConfig={"Delay": 1, "MaxAttempts": timeout or 3600},
+                WaiterConfig={"Delay": WAITER_DELAY_SECONDS, "MaxAttempts": max_attempts},
             )
             self.logger.debug("waiter completed for command_id=%s", command_id)
 
@@ -554,13 +560,13 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
         params: dict[str, Any] = {
             "commands": commands,
-            "executionTimeout": ["3600"],
+            "executionTimeout": [str(DEFAULT_SANDBOX_TIMEOUT_SECONDS)],
         }
 
         s3_key_prefix = self._s3_key_prefix("exec")
 
         result = self._run_command(
-            s3_key_prefix=s3_key_prefix, params=params, timeout=3600
+            s3_key_prefix=s3_key_prefix, params=params, timeout=DEFAULT_SANDBOX_TIMEOUT_SECONDS
         )
 
         if not result.success:
@@ -653,13 +659,13 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
         params: dict[str, Any] = {
             "commands": commands,
-            "executionTimeout": ["3600"],
+            "executionTimeout": [str(DEFAULT_SANDBOX_TIMEOUT_SECONDS)],
         }
 
         s3_key_prefix = self._s3_key_prefix("write_file")
 
         result = self._run_command(
-            s3_key_prefix=s3_key_prefix, params=params, timeout=3600
+            s3_key_prefix=s3_key_prefix, params=params, timeout=DEFAULT_SANDBOX_TIMEOUT_SECONDS
         )
 
         # Clean up the S3 object

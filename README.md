@@ -128,7 +128,6 @@ See [schema.py](src/ec2sandbox/schema.py) for details.
 - Move long-running AWS commands to a separate thread to avoid blocking Inspect's TUI
 - Integration testing of all features
 - Add more sample evals
-- many timeouts are hard-coded
 - better logging/tracing
 
 
