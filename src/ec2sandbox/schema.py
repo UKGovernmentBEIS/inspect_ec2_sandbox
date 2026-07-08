@@ -54,6 +54,8 @@ class Ec2SandboxEnvironmentConfig(BaseModel):
             AMI's baked-in size is used.
     """
 
+    # forbid extras so a typo'd override or a stale from_settings(session=...)
+    # fails loudly instead of being silently dropped.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     # Shared fields — used by both the direct-EC2 path and any custom
@@ -83,19 +85,10 @@ class Ec2SandboxEnvironmentConfig(BaseModel):
 
         Args:
             **kwargs: Field-level overrides applied on top of env-var settings.
-                Must be names of config fields; unknown keys raise TypeError.
-                (In particular ``session`` is no longer accepted — AMI
-                resolution is deferred to instance creation, so from_settings
-                makes no AWS calls.)
+                Must be config field names; unknown keys (e.g. a stale
+                ``session=``) raise a pydantic ValidationError via the model's
+                ``extra="forbid"``.
         """
-        # pydantic silently drops unknown fields, so validate here — otherwise
-        # a stale session= or a typo'd override is a silent no-op.
-        unknown = set(kwargs) - set(cls.model_fields)
-        if unknown:
-            raise TypeError(
-                f"from_settings() got unexpected keyword argument(s): "
-                f"{', '.join(sorted(unknown))}"
-            )
         settings = _Ec2ExistingInfraSettings()
 
         params = {
