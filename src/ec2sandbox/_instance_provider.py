@@ -34,6 +34,23 @@ _logger = logging.getLogger(__name__)
 # default provider's ``find_sandbox_instances`` can discover them.
 MARKER_TAG_KEY = "inspect_sandbox"
 
+# EC2 error codes meaning "this AMI ID isn't in this region". Turned into a
+# clear ValueError so the common footgun — running an eval that hardcodes an
+# AMI in a different region from the one the session resolved — is legible.
+_AMI_NOT_FOUND_CODES = frozenset(
+    {"InvalidAMIID.NotFound", "InvalidAMIID.Malformed", "InvalidAMIID.Unavailable"}
+)
+
+
+def _ami_region_mismatch_error(ami_id: str, region: str) -> ValueError:
+    return ValueError(
+        f"AMI '{ami_id}' was not found in region '{region}'. AMI IDs are "
+        "region-scoped, so an eval that hardcodes ami_id only runs in that "
+        "AMI's region. Set INSPECT_EC2_SANDBOX_REGION (or the config's region) "
+        "to the AMI's region, or omit ami_id to auto-resolve the Ubuntu 24.04 "
+        "image for the resolved region."
+    )
+
 
 @dataclass(frozen=True)
 class ProvisionedInstance:
@@ -166,7 +183,9 @@ def _root_device_name(ec2_client: Any, ami_id: str) -> str:
     resp = ec2_client.describe_images(ImageIds=[ami_id])
     images = resp.get("Images", [])
     if not images:
-        raise ValueError(f"AMI {ami_id} not found when resolving root device name")
+        # Almost always an AMI/region mismatch (describe_images returns an
+        # empty list rather than erroring for a foreign-region AMI).
+        raise _ami_region_mismatch_error(ami_id, ec2_client.meta.region_name)
     return images[0]["RootDeviceName"]
 
 
@@ -290,7 +309,15 @@ class DefaultEc2InstanceProvider:
                     "Ebs": {"VolumeSize": volume_size},
                 }
             ]
-        response = ec2_client.run_instances(**instance_params, MinCount=1, MaxCount=1)
+        try:
+            response = ec2_client.run_instances(
+                **instance_params, MinCount=1, MaxCount=1
+            )
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code")
+            if code in _AMI_NOT_FOUND_CODES:
+                raise _ami_region_mismatch_error(ami_id, region) from e
+            raise
         instance = response["Instances"][0]
         instance_id = instance["InstanceId"]
 

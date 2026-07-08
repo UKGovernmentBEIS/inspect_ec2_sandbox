@@ -1,6 +1,7 @@
 from unittest import mock
 
 import pytest
+from botocore.exceptions import ClientError
 
 from ec2sandbox._instance_provider import DefaultEc2InstanceProvider
 from ec2sandbox.schema import Ec2SandboxEnvironmentConfig
@@ -126,6 +127,40 @@ async def test_create_instance_stamps_session_resolved_region():
         c for c in provider._session.client.call_args_list if c.args[0] == "ec2"
     )
     assert ec2_call.kwargs["region_name"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_instances_ami_not_found_raises_region_hint():
+    """A region-scoped AMI missing in the resolved region gets a clear error."""
+    provider, ec2_client, _ = _make_provider_with_mocks(_make_config())
+    ec2_client.meta.region_name = "us-east-1"
+    ec2_client.run_instances.side_effect = ClientError(
+        {"Error": {"Code": "InvalidAMIID.NotFound", "Message": "nope"}},
+        "RunInstances",
+    )
+
+    with pytest.raises(ValueError, match="region-scoped"):
+        await provider.create_instance(
+            instance_type="t3a.micro",
+            ami_id="ami-123",
+            tags=[("Name", "x")],
+        )
+
+
+@pytest.mark.asyncio
+async def test_volume_size_ami_not_found_raises_region_hint():
+    """describe_images returning no images (foreign-region AMI) is translated too."""
+    provider, ec2_client, _ = _make_provider_with_mocks(_make_config(volume_size=100))
+    ec2_client.meta.region_name = "us-east-1"
+    ec2_client.describe_images.return_value = {"Images": []}
+
+    with pytest.raises(ValueError, match="region-scoped"):
+        await provider.create_instance(
+            instance_type="t3a.micro",
+            ami_id="ami-123",
+            tags=[("Name", "x")],
+            volume_size=100,
+        )
 
 
 @pytest.mark.asyncio
