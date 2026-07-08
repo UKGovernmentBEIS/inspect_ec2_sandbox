@@ -106,6 +106,29 @@ async def test_create_instance_resolves_and_caches_ami_when_empty():
 
 
 @pytest.mark.asyncio
+async def test_create_instance_stamps_session_resolved_region():
+    """With no region in config, it's resolved off the client and stamped.
+
+    The ec2 client is built with region_name=None so the session resolves the
+    region; ProvisionedInstance.region then carries the concrete value.
+    """
+    provider, ec2_client, _ = _make_provider_with_mocks(_make_config(region=None))
+    ec2_client.meta.region_name = "us-east-1"
+
+    result = await provider.create_instance(
+        instance_type="t3a.micro",
+        ami_id="ami-123",
+        tags=[("Name", "x")],
+    )
+
+    assert result.region == "us-east-1"
+    ec2_call = next(
+        c for c in provider._session.client.call_args_list if c.args[0] == "ec2"
+    )
+    assert ec2_call.kwargs["region_name"] is None
+
+
+@pytest.mark.asyncio
 async def test_create_instance_with_volume_size_sets_block_device_mappings():
     provider, ec2_client, _ = _make_provider_with_mocks(_make_config(volume_size=100))
 

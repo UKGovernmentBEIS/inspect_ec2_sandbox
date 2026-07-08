@@ -15,7 +15,6 @@ sandbox is used.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
@@ -206,12 +205,12 @@ class DefaultEc2InstanceProvider:
     """Default :class:`Ec2InstanceProvider` using direct boto3 calls.
 
     Used by the EC2 sandbox when no custom provider has been registered.
-    Reads the infrastructure fields (``region``, ``security_group_id``,
+    Reads the infrastructure fields (``security_group_id``, ``subnet_id``,
     etc.) from the supplied :class:`Ec2SandboxEnvironmentConfig` at the
-    point they are needed — ``create_instance`` requires the full set,
-    while ``terminate_instance`` and ``find_sandbox_instances`` only
-    need a region (the instance's own region for terminate; the
-    configured region for find).
+    point they are needed. Region is never required in the config: each
+    method builds its client with ``region_name=config.region`` (an
+    explicit override, or ``None`` to let the session resolve it) and reads
+    the resolved region back off the client.
     """
 
     # Process-global Ubuntu 24.04 AMI cache keyed on region. Canonical's
@@ -249,7 +248,6 @@ class DefaultEc2InstanceProvider:
     ) -> ProvisionedInstance:
         cfg = self._config
         required = {
-            "region": cfg.region,
             "security_group_id": cfg.security_group_id,
             "subnet_id": cfg.subnet_id,
             "instance_profile": cfg.instance_profile,
@@ -264,11 +262,17 @@ class DefaultEc2InstanceProvider:
                 "register an Ec2InstanceProvider."
             )
 
-        if not ami_id:
-            assert cfg.region is not None  # validated above
-            ami_id = self._resolve_ubu24_ami(cfg.region)
-
+        # region_name=cfg.region is an explicit override when set; otherwise
+        # the session resolves it and raises NoRegionError if nothing is
+        # configured. Read the resolved value back off the client so the rest
+        # of the method (AMI lookup, SSM client, ProvisionedInstance) uses a
+        # concrete region rather than a possibly-None config field.
         ec2_client = self._session.client("ec2", region_name=cfg.region)
+        region = ec2_client.meta.region_name
+
+        if not ami_id:
+            ami_id = self._resolve_ubu24_ami(region)
+
         instance_params: dict[str, Any] = {
             "ImageId": ami_id,
             "InstanceType": instance_type,
@@ -297,7 +301,7 @@ class DefaultEc2InstanceProvider:
             waiter = ec2_client.get_waiter("instance_running")
             waiter.wait(InstanceIds=[instance_id])
 
-            ssm_client = self._session.client("ssm", region_name=cfg.region)
+            ssm_client = self._session.client("ssm", region_name=region)
             _wait_for_ssm(instance_id, ssm_client)
         except BaseException:
             try:
@@ -310,11 +314,10 @@ class DefaultEc2InstanceProvider:
                 )
             raise
 
-        assert cfg.region is not None  # validated above
         assert cfg.s3_bucket is not None  # validated above
         return ProvisionedInstance(
             instance_id=instance_id,
-            region=cfg.region,
+            region=region,
             s3_bucket=cfg.s3_bucket,
             s3_key_prefix=cfg.s3_key_prefix,
         )
@@ -324,14 +327,11 @@ class DefaultEc2InstanceProvider:
         ec2.terminate_instances(InstanceIds=[instance_id])
 
     async def find_sandbox_instances(self) -> list[SandboxInstanceInfo]:
-        # cli_cleanup builds this provider with an empty config (no region),
-        # so fall back to AWS_REGION / AWS_DEFAULT_REGION as the session does.
-        region = (
-            self._config.region
-            or os.getenv("AWS_REGION")
-            or os.getenv("AWS_DEFAULT_REGION")
-        )
-        ec2 = self._session.client("ec2", region_name=region or None)
+        # cli_cleanup builds this provider with an empty config, so region is
+        # usually None here and the session resolves it. Read the resolved
+        # region back off the client to stamp on each SandboxInstanceInfo.
+        ec2 = self._session.client("ec2", region_name=self._config.region)
+        region = ec2.meta.region_name
         response = ec2.describe_instances(
             Filters=[
                 {"Name": f"tag:{MARKER_TAG_KEY}", "Values": ["true"]},
@@ -353,7 +353,7 @@ class DefaultEc2InstanceProvider:
                     SandboxInstanceInfo(
                         instance_id=instance["InstanceId"],
                         name=name,
-                        region=region or "",
+                        region=region,
                     )
                 )
         return results
