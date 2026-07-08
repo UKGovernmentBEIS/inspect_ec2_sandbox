@@ -64,9 +64,6 @@ async def test_self_check(ec2_sandbox_environment) -> None:
         "test_read_file_not_allowed",  # user is root, so this doesn't work
         "test_write_text_file_without_permissions",  # user is root
         "test_write_binary_file_without_permissions",  # user is root
-        "test_exec_timeout",  # cancel_command requires ssm:CancelCommand
-        "test_exec_stdout_is_limited",  # SSM truncates large output before S3 upload
-        "test_exec_stderr_is_limited",  # SSM truncates large output before S3 upload
     ]
 
     return await check_results_of_self_check(ec2_sandbox_environment, known_failures)
