@@ -76,17 +76,24 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
     s3_bucket: Optional[str] = None
 
     @classmethod
-    def from_settings(cls, session=None, **kwargs):
+    def from_settings(cls, **kwargs):
         """Create an instance from environment settings with optional overrides.
 
         Args:
-            session: Deprecated and ignored. AMI resolution is now deferred to
-                DefaultEc2InstanceProvider.create_instance, so from_settings no
-                longer makes AWS calls. Accepted (and ignored) so existing
-                callers passing a session don't break.
             **kwargs: Field-level overrides applied on top of env-var settings.
+                Must be names of config fields; unknown keys raise TypeError.
+                (In particular ``session`` is no longer accepted — AMI
+                resolution is deferred to instance creation, so from_settings
+                makes no AWS calls.)
         """
-        del session  # accepted for backwards compatibility only
+        # pydantic silently drops unknown fields, so validate here — otherwise
+        # a stale session= or a typo'd override is a silent no-op.
+        unknown = set(kwargs) - set(cls.model_fields)
+        if unknown:
+            raise TypeError(
+                f"from_settings() got unexpected keyword argument(s): "
+                f"{', '.join(sorted(unknown))}"
+            )
         settings = _Ec2ExistingInfraSettings()
 
         params = {
