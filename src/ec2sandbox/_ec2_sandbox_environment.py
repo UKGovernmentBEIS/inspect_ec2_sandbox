@@ -6,6 +6,7 @@ import shlex
 import string
 import sys
 from datetime import datetime
+from importlib.metadata import entry_points
 from logging import getLogger
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Union
@@ -54,6 +55,29 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
     _session: ClassVar[boto3.Session | None] = None
 
+    _providers_loaded: ClassVar[bool] = False
+
+    @classmethod
+    def _ensure_providers_loaded(cls) -> None:
+        """Load inspect_ai entry points so a side-effect-registered provider installs.
+
+        inspect_ai loads entry points lazily and skips the sweep once the
+        ``ec2`` sandboxenv is registered, so a provider registered via a
+        separate entry point can be missed depending on import order. We sweep
+        here before falling back to the default provider so resolution doesn't
+        depend on that order.
+        """
+        if cls._providers_loaded:
+            return
+        cls._providers_loaded = True
+        for ep in entry_points(group="inspect_ai"):
+            try:
+                ep.load()
+            except Exception:
+                cls.logger.debug(
+                    "failed loading inspect_ai entry point %s", ep.value, exc_info=True
+                )
+
     @classmethod
     def set_session(cls, session: boto3.Session) -> None:
         """Set the boto3 session used for all AWS operations.
@@ -96,6 +120,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     ) -> None:
         # If a custom provider supplies a session, adopt it before any
         # samples run so all runtime boto3 calls share the same credentials.
+        cls._ensure_providers_loaded()
         provider = get_ec2_instance_provider()
         provider_session = get_provider_session(provider)
         if provider_session is not None:
@@ -115,6 +140,9 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         environment settings when ``config`` is ``None``).
         """
         registered = get_ec2_instance_provider()
+        if registered is None:
+            cls._ensure_providers_loaded()
+            registered = get_ec2_instance_provider()
         if isinstance(config, Ec2SandboxEnvironmentConfig):
             resolved_config = config
         elif config is None:
