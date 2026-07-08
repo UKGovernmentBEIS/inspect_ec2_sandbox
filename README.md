@@ -122,6 +122,23 @@ sandbox=SandboxEnvironmentSpec("ec2", Ec2SandboxEnvironmentConfig.from_settings(
 
 See [schema.py](src/ec2sandbox/schema.py) for details.
 
+### Multiple sandbox environments per sample
+
+By default each sample gets a single environment named `"default"`. To run a
+multi-host topology where environments are addressed separately, set
+`sandbox_names`:
+
+```python
+sandbox=SandboxEnvironmentSpec("ec2", Ec2SandboxEnvironmentConfig.from_settings(
+    ...,
+    sandbox_names=("victim", "attacker"),
+)),
+```
+
+One instance is created per name (concurrently), all symmetric (same
+`instance_type`, `ami_id`, `volume_size`). The first name is the default, so
+`sandbox()` returns `victim` and `sandbox("attacker")` returns the second.
+
 ## Tech Debt / Missing features
 
 - task_cleanup is not implemented; only the default sample_cleanup is, so if you Ctrl-C a run, you have to clean up with the CLI command

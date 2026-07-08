@@ -9,7 +9,7 @@ import os
 from typing import Optional, Tuple
 
 import boto3
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from ._unpack_tags import unpack_tags
@@ -53,6 +53,12 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
         extra_tags: tuple of 2-tuples of additional tags
         volume_size: Root EBS volume size in GiB (optional). If None, the
             AMI's baked-in size is used.
+        sandbox_names: names of the sandbox environments to create for each
+            sample (optional). When set, one instance is created per name and
+            the environments are addressable via ``sandbox("<name>")``, with
+            the first name as the default. When empty, a single ``"default"``
+            environment is created (the original behaviour). All instances are
+            symmetric (same instance_type, ami_id, volume_size).
     """
 
     # Shared fields — used by both the direct-EC2 path and any custom
@@ -62,6 +68,7 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
     extra_tags: Tuple[Tuple[str, str], ...] = ()
     s3_key_prefix: str = ""
     volume_size: Optional[int] = None
+    sandbox_names: Tuple[str, ...] = ()
 
     # Direct-EC2-path fields — required when no Ec2InstanceProvider is
     # registered, ignored otherwise. ``sample_init`` validates these at
@@ -73,6 +80,15 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
     subnet_id: Optional[str] = None
     instance_profile: Optional[str] = None
     s3_bucket: Optional[str] = None
+
+    @field_validator("sandbox_names")
+    @classmethod
+    def _validate_sandbox_names(cls, value: Tuple[str, ...]) -> Tuple[str, ...]:
+        if any(not name for name in value):
+            raise ValueError("sandbox_names must not contain empty strings")
+        if len(set(value)) != len(value):
+            raise ValueError(f"sandbox_names must be unique, got {value}")
+        return value
 
     @classmethod
     def from_settings(cls, session: "boto3.Session | None" = None, **kwargs):

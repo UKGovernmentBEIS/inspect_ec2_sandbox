@@ -118,3 +118,104 @@ async def test_sample_init_omits_volume_size_when_unset():
     # so sample_init must not pass the kwarg at all when it is None.
     kwargs = await _call_sample_init(_make_config())
     assert "volume_size" not in kwargs
+
+
+def _make_recording_provider():
+    """Fake provider: records each create_instance call, distinct id per call."""
+    from ec2sandbox._instance_provider import ProvisionedInstance
+
+    provider = mock.MagicMock()
+    provider.calls = []
+
+    async def create_instance(**kwargs):
+        provider.calls.append(kwargs)
+        return ProvisionedInstance(
+            instance_id=f"i-{len(provider.calls)}",
+            region="eu-west-2",
+            s3_bucket="bucket-1",
+        )
+
+    async def terminate_instance(instance_id, region):
+        provider.terminated.append(instance_id)
+
+    provider.terminated = []
+    provider.create_instance = create_instance
+    provider.terminate_instance = terminate_instance
+    return provider
+
+
+async def _sample_init_with(provider, config):
+    from ec2sandbox._ec2_sandbox_environment import Ec2SandboxEnvironment
+
+    with mock.patch(
+        "ec2sandbox._ec2_sandbox_environment.get_ec2_instance_provider",
+        return_value=provider,
+    ):
+        return await Ec2SandboxEnvironment.sample_init(
+            task_name="t", config=config, metadata={}
+        )
+
+
+@pytest.mark.asyncio
+async def test_sample_init_single_default_when_no_names():
+    provider = _make_recording_provider()
+    envs = await _sample_init_with(provider, _make_config())
+
+    assert list(envs.keys()) == ["default"]
+    assert len(provider.calls) == 1
+    # Name tag unchanged from the original single-instance behaviour.
+    name_tag = dict(provider.calls[0]["tags"])["Name"]
+    assert name_tag == "inspect_ec2_sandbox_t"
+
+
+@pytest.mark.asyncio
+async def test_sample_init_creates_one_instance_per_name():
+    provider = _make_recording_provider()
+    envs = await _sample_init_with(provider, _make_config(sandbox_names=("a", "b")))
+
+    # First name is the default; order preserved.
+    assert list(envs.keys()) == ["a", "b"]
+    assert envs["a"].instance_id != envs["b"].instance_id
+    assert len(provider.calls) == 2
+    name_tags = sorted(dict(c["tags"])["Name"] for c in provider.calls)
+    assert name_tags == ["inspect_ec2_sandbox_t_a", "inspect_ec2_sandbox_t_b"]
+
+
+@pytest.mark.asyncio
+async def test_sample_init_rolls_back_on_partial_failure():
+    from ec2sandbox._instance_provider import ProvisionedInstance
+
+    provider = mock.MagicMock()
+    provider.terminated = []
+    created_ids = []
+
+    async def create_instance(**kwargs):
+        name = dict(kwargs["tags"])["Name"]
+        if name.endswith("_b"):
+            raise RuntimeError("boom")
+        created_ids.append("i-a")
+        return ProvisionedInstance(
+            instance_id="i-a", region="eu-west-2", s3_bucket="bucket-1"
+        )
+
+    async def terminate_instance(instance_id, region):
+        provider.terminated.append(instance_id)
+
+    provider.create_instance = create_instance
+    provider.terminate_instance = terminate_instance
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _sample_init_with(provider, _make_config(sandbox_names=("a", "b")))
+
+    # The instance that did come up must be terminated, not leaked.
+    assert provider.terminated == created_ids == ["i-a"]
+
+
+def test_sandbox_names_must_be_unique():
+    with pytest.raises(ValueError, match="unique"):
+        _make_config(sandbox_names=("a", "a"))
+
+
+def test_sandbox_names_must_not_be_empty_strings():
+    with pytest.raises(ValueError, match="empty"):
+        _make_config(sandbox_names=("a", ""))
