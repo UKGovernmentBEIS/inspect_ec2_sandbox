@@ -1,6 +1,5 @@
 import hashlib
 import subprocess
-from importlib.metadata import entry_points
 from typing import AsyncGenerator, List
 
 import pytest
@@ -13,11 +12,6 @@ pytestmark = pytest.mark.req_aws
 
 @pytest.fixture
 async def ec2_sandbox_environment() -> AsyncGenerator[Ec2SandboxEnvironment, None]:
-    # Load inspect_ai entry points so any registered Ec2InstanceProvider is installed.
-    # inspect_ai.eval() does this itself, but this test bypasses eval().
-    for ep in entry_points(group="inspect_ai"):
-        ep.load()
-
     task_name = "unit_test"
     envs = await Ec2SandboxEnvironment.sample_init(
         task_name=task_name,

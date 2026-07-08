@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from importlib.metadata import entry_points
 
 import boto3
 import pytest
@@ -23,8 +22,7 @@ def _load_inspect_entrypoints() -> None:
     inspect_ai.eval() does this itself, but tests that bypass eval() (or
     that need the provider at fixture-setup time) must load them manually.
     """
-    for ep in entry_points(group="inspect_ai"):
-        ep.load()
+    Ec2SandboxEnvironment._ensure_providers_loaded()
 
 
 @pytest.fixture(autouse=True)
