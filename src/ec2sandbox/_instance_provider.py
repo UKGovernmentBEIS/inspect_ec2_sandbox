@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 import boto3
 from botocore.exceptions import ClientError  # noqa: F401  (re-exported for convenience)
@@ -164,6 +164,21 @@ def _root_device_name(ec2_client: Any, ami_id: str) -> str:
     return images[0]["RootDeviceName"]
 
 
+def _find_ami_ubu24(ssm_client: Any) -> str:
+    """Look up the current Ubuntu 24.04 AMI via SSM Parameter Store."""
+    # see https://documentation.ubuntu.com/aws/aws-how-to/instances/find-ubuntu-images/
+    response = ssm_client.get_parameters(
+        Names=[
+            "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+        ]
+    )
+
+    if not response["Parameters"]:
+        raise ValueError("Could not find Ubuntu 24.04 AMI ID in SSM Parameter Store")
+
+    return response["Parameters"][0]["Value"]
+
+
 @retry(stop=stop_after_attempt(20), wait=wait_fixed(30))
 def _wait_for_ssm(instance_id: str, ssm_client: Any) -> bool:
     """Wait for SSM agent to come online on the given instance."""
@@ -191,6 +206,14 @@ class DefaultEc2InstanceProvider:
     need the supplied ``region``.
     """
 
+    # Process-global Ubuntu 24.04 AMI cache keyed on region. Canonical's
+    # published AMI ID is the same regardless of session, so a per-region
+    # entry is safe; the configured ``self._session`` is still used for
+    # the actual SSM call on cache miss. Intentionally never invalidated:
+    # the process is short-lived (one eval run) and pinning a single AMI
+    # across all samples in a run is desirable.
+    _ami_cache: ClassVar[dict[str, str]] = {}
+
     def __init__(
         self,
         config: "Ec2SandboxEnvironmentConfig",
@@ -201,6 +224,13 @@ class DefaultEc2InstanceProvider:
 
     def get_session(self) -> boto3.Session:
         return self._session
+
+    def _resolve_ubu24_ami(self, region: str) -> str:
+        cache = DefaultEc2InstanceProvider._ami_cache
+        if region not in cache:
+            ssm_client = self._session.client("ssm", region_name=region)
+            cache[region] = _find_ami_ubu24(ssm_client)
+        return cache[region]
 
     async def create_instance(
         self,
@@ -216,7 +246,6 @@ class DefaultEc2InstanceProvider:
             "subnet_id": cfg.subnet_id,
             "instance_profile": cfg.instance_profile,
             "s3_bucket": cfg.s3_bucket,
-            "ami_id": ami_id,
         }
         missing = [name for name, value in required.items() if not value]
         if missing:
@@ -226,6 +255,10 @@ class DefaultEc2InstanceProvider:
                 "Either populate them (typically via from_settings) or "
                 "register an Ec2InstanceProvider."
             )
+
+        if not ami_id:
+            assert cfg.region is not None  # validated above
+            ami_id = self._resolve_ubu24_ami(cfg.region)
 
         ec2_client = self._session.client("ec2", region_name=cfg.region)
         instance_params: dict[str, Any] = {
@@ -249,11 +282,25 @@ class DefaultEc2InstanceProvider:
         instance = response["Instances"][0]
         instance_id = instance["InstanceId"]
 
-        waiter = ec2_client.get_waiter("instance_running")
-        waiter.wait(InstanceIds=[instance_id])
+        # If anything between here and a successful return raises, we own
+        # an instance that the sandbox layer will never see — terminate it
+        # so the caller doesn't have to know.
+        try:
+            waiter = ec2_client.get_waiter("instance_running")
+            waiter.wait(InstanceIds=[instance_id])
 
-        ssm_client = self._session.client("ssm", region_name=cfg.region)
-        _wait_for_ssm(instance_id, ssm_client)
+            ssm_client = self._session.client("ssm", region_name=cfg.region)
+            _wait_for_ssm(instance_id, ssm_client)
+        except BaseException:
+            try:
+                ec2_client.terminate_instances(InstanceIds=[instance_id])
+            except Exception as cleanup_err:
+                _logger.warning(
+                    "Failed to terminate %s after create_instance error: %s",
+                    instance_id,
+                    cleanup_err,
+                )
+            raise
 
         assert cfg.region is not None  # validated above
         assert cfg.s3_bucket is not None  # validated above

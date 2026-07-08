@@ -6,9 +6,10 @@ import shlex
 import string
 import sys
 from datetime import datetime
+from importlib.metadata import entry_points
 from logging import getLogger
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Union
+from typing import Any, ClassVar, Dict, List, Set, Tuple, Union
 
 import boto3
 from botocore.exceptions import ClientError, WaiterError
@@ -54,6 +55,16 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
 
     _session: ClassVar[boto3.Session | None] = None
 
+    _providers_loaded: ClassVar[bool] = False
+
+    # Process-global tracker of provisioned (instance_id, region) tuples.
+    # sample_init registers, successful sample_cleanup deregisters,
+    # task_cleanup sweeps survivors (Ctrl-C, setup-script failures, etc.).
+    # Matches the k8s / proxmox sandbox pattern of a shared tracker — note
+    # that inspect_ai calls task_cleanup with task_name="shutdown" (a phase
+    # marker, not the real task name) so we cannot key by task_name.
+    _tracked_instances: ClassVar[Set[Tuple[str, str]]] = set()
+
     @classmethod
     def set_session(cls, session: boto3.Session) -> None:
         """Set the boto3 session used for all AWS operations.
@@ -68,6 +79,26 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         if cls._session is None:
             cls._session = boto3.Session()
         return cls._session
+
+    @classmethod
+    def _ensure_providers_loaded(cls) -> None:
+        """Load inspect_ai entry points so a side-effect-registered provider installs.
+
+        inspect_ai loads entry points lazily and skips the sweep once the ``ec2``
+        sandboxenv is registered, so a provider registered via a separate entry
+        point can be missed depending on import order. Sweep here before falling
+        back to the default so resolution doesn't depend on that order.
+        """
+        if cls._providers_loaded:
+            return
+        cls._providers_loaded = True
+        for ep in entry_points(group="inspect_ai"):
+            try:
+                ep.load()
+            except Exception:
+                cls.logger.debug(
+                    "failed loading inspect_ai entry point %s", ep.value, exc_info=True
+                )
 
     def __init__(
         self,
@@ -96,6 +127,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
     ) -> None:
         # If a custom provider supplies a session, adopt it before any
         # samples run so all runtime boto3 calls share the same credentials.
+        cls._ensure_providers_loaded()
         provider = get_ec2_instance_provider()
         provider_session = get_provider_session(provider)
         if provider_session is not None:
@@ -115,15 +147,16 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         environment settings when ``config`` is ``None``).
         """
         registered = get_ec2_instance_provider()
+        if registered is None:
+            cls._ensure_providers_loaded()
+            registered = get_ec2_instance_provider()
         if isinstance(config, Ec2SandboxEnvironmentConfig):
             resolved_config = config
         elif config is None:
             resolved_config = (
                 Ec2SandboxEnvironmentConfig()
                 if registered is not None
-                else Ec2SandboxEnvironmentConfig.from_settings(
-                    session=cls._get_session()
-                )
+                else Ec2SandboxEnvironmentConfig.from_settings()
             )
         else:
             raise ValueError("config must be a Ec2SandboxEnvironmentConfig")
@@ -176,6 +209,8 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             result.region,
         )
 
+        cls._tracked_instances.add((result.instance_id, result.region))
+
         environment = Ec2SandboxEnvironment(
             instance_id=result.instance_id,
             region=result.region,
@@ -193,23 +228,20 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         environments: Dict[str, SandboxEnvironment],
         interrupted: bool,
     ) -> None:
+        # Interrupted samples skip per-sample cleanup; task_cleanup will
+        # sweep them up at the end of the task. This matches the docker /
+        # k8s / proxmox sandboxes (lets task_cleanup show its output in
+        # one go, and catches the case where init_sandbox_environments_sample
+        # raised partway through and we still got called with interrupted=True).
         if interrupted:
             return None
 
-        # Cleanup only needs terminate_instance, which doesn't depend on
-        # the direct-EC2 infra fields. A minimal default config is fine
-        # when none was supplied.
-        registered = get_ec2_instance_provider()
-        if registered is not None:
-            provider: Ec2InstanceProvider = registered
-        else:
-            provider = DefaultEc2InstanceProvider(
-                Ec2SandboxEnvironmentConfig(), cls._get_session()
-            )
-
+        provider, _ = cls._resolve_provider(config)
         for env in environments.values():
-            if isinstance(env, Ec2SandboxEnvironment):
-                await provider.terminate_instance(env.instance_id, env.region)
+            if not isinstance(env, Ec2SandboxEnvironment):
+                continue
+            await provider.terminate_instance(env.instance_id, env.region)
+            cls._tracked_instances.discard((env.instance_id, env.region))
         return None
 
     @classmethod
@@ -220,6 +252,35 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
+        # inspect_ai calls this once at the end of a run with task_name="shutdown".
+        # Drain everything still tracked — sample_cleanup(interrupted=False)
+        # will have already removed the ones that succeeded.
+        tracked = list(cls._tracked_instances)
+        cls._tracked_instances.clear()
+        if not tracked:
+            return None
+
+        if not cleanup:
+            # --no-sandbox-cleanup: leave instances running.
+            print(
+                f"\n[yellow]{len(tracked)} EC2 sandbox instance(s) left "
+                f"running (--no-sandbox-cleanup).[/yellow]\n"
+                "Cleanup with: [blue]inspect sandbox cleanup ec2[/blue]\n"
+            )
+            return None
+
+        provider, _ = cls._resolve_provider(config)
+        for instance_id, region in tracked:
+            try:
+                await provider.terminate_instance(instance_id, region)
+            except Exception as e:
+                # Per-item: one bad termination must not block the others.
+                cls.logger.warning(
+                    "task_cleanup: failed to terminate %s in %s: %s",
+                    instance_id,
+                    region,
+                    e,
+                )
         return None
 
     @override
@@ -284,13 +345,7 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             print("\n[red]Cleanup by ID not implemented[/red]\n")
             return
 
-        registered = get_ec2_instance_provider()
-        if registered is not None:
-            provider: Ec2InstanceProvider = registered
-        else:
-            provider = DefaultEc2InstanceProvider(
-                Ec2SandboxEnvironmentConfig(), cls._get_session()
-            )
+        provider, _ = cls._resolve_provider(None)
 
         fallback_region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", ""))
         instances = await provider.find_sandbox_instances(fallback_region)
