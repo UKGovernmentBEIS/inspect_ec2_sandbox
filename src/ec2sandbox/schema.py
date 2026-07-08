@@ -8,7 +8,7 @@ This module provides configuration classes and utility functions for defining
 import os
 from typing import Optional, Tuple
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from ._unpack_tags import unpack_tags
@@ -32,7 +32,7 @@ class _Ec2ExistingInfraSettings(BaseSettings):
     extra_tags_str: Optional[str] = None  # in the format "key1=value1;key2=value2"
 
 
-class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
+class Ec2SandboxEnvironmentConfig(BaseModel):
     """
     Configuration for an EC2 sandbox environment.
 
@@ -53,6 +53,10 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
         volume_size: Root EBS volume size in GiB (optional). If None, the
             AMI's baked-in size is used.
     """
+
+    # forbid extras so a typo'd override or a stale from_settings(session=...)
+    # fails loudly instead of being silently dropped.
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     # Shared fields — used by both the direct-EC2 path and any custom
     # Ec2InstanceProvider. Have sensible defaults.
@@ -81,19 +85,10 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
 
         Args:
             **kwargs: Field-level overrides applied on top of env-var settings.
-                Must be names of config fields; unknown keys raise TypeError.
-                (In particular ``session`` is no longer accepted — AMI
-                resolution is deferred to instance creation, so from_settings
-                makes no AWS calls.)
+                Must be config field names; unknown keys (e.g. a stale
+                ``session=``) raise a pydantic ValidationError via the model's
+                ``extra="forbid"``.
         """
-        # pydantic silently drops unknown fields, so validate here — otherwise
-        # a stale session= or a typo'd override is a silent no-op.
-        unknown = set(kwargs) - set(cls.model_fields)
-        if unknown:
-            raise TypeError(
-                f"from_settings() got unexpected keyword argument(s): "
-                f"{', '.join(sorted(unknown))}"
-            )
         settings = _Ec2ExistingInfraSettings()
 
         params = {
