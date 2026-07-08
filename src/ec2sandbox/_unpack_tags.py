@@ -12,7 +12,7 @@ def unpack_tags(tags: str | None) -> Tuple[Tuple[str, str], ...]:
         except ValueError:
             raise ValueError(
                 "Tags must be in the format 'key1=value1;key2=value2', "
-                "but instead got {tags}"
+                f"but instead got {tags}"
             )
     return tuple(tags_unpacked)
 
