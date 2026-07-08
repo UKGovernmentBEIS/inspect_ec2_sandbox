@@ -76,12 +76,17 @@ class Ec2SandboxEnvironmentConfig(BaseModel, frozen=True):
     s3_bucket: Optional[str] = None
 
     @classmethod
-    def from_settings(cls, **kwargs):
+    def from_settings(cls, session=None, **kwargs):
         """Create an instance from environment settings with optional overrides.
 
         Args:
+            session: Deprecated and ignored. AMI resolution is now deferred to
+                DefaultEc2InstanceProvider.create_instance, so from_settings no
+                longer makes AWS calls. Accepted (and ignored) so existing
+                callers passing a session don't break.
             **kwargs: Field-level overrides applied on top of env-var settings.
         """
+        del session  # accepted for backwards compatibility only
         settings = _Ec2ExistingInfraSettings()
 
         params = {
