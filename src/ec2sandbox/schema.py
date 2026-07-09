@@ -105,12 +105,6 @@ class Ec2SandboxEnvironmentConfig(BaseModel):
         # Override with any provided kwargs
         params.update(kwargs)
 
-        # region is left as-is (may be None). Don't reimplement botocore's
-        # resolution chain: the boto3 session resolves the region (AWS_REGION
-        # / AWS_DEFAULT_REGION / ~/.aws/config) at client-construction time,
-        # and raises NoRegionError loudly if nothing is configured. An explicit
-        # INSPECT_EC2_SANDBOX_REGION (or region= kwarg) overrides that chain.
-
         # AMI resolution is deferred to DefaultEc2InstanceProvider.create_instance
         # so that callers who only need terminate/find don't pay for an SSM
         # AMI lookup just to construct a config.

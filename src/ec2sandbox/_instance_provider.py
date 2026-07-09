@@ -281,11 +281,9 @@ class DefaultEc2InstanceProvider:
                 "register an Ec2InstanceProvider."
             )
 
-        # region_name=cfg.region is an explicit override when set; otherwise
-        # the session resolves it and raises NoRegionError if nothing is
-        # configured. Read the resolved value back off the client so the rest
-        # of the method (AMI lookup, SSM client, ProvisionedInstance) uses a
-        # concrete region rather than a possibly-None config field.
+        # Read the resolved region back so the rest of the method (AMI lookup,
+        # SSM client, ProvisionedInstance) has a concrete value, not cfg.region
+        # which may be None.
         ec2_client = self._session.client("ec2", region_name=cfg.region)
         region = ec2_client.meta.region_name
 
