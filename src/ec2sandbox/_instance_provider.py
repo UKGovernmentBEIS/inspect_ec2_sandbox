@@ -180,11 +180,19 @@ def get_provider_session(
 
 def _root_device_name(ec2_client: Any, ami_id: str) -> str:
     """Return the root device name (e.g. ``/dev/sda1``) for ``ami_id``."""
-    resp = ec2_client.describe_images(ImageIds=[ami_id])
+    try:
+        resp = ec2_client.describe_images(ImageIds=[ami_id])
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code")
+        if code in _AMI_NOT_FOUND_CODES:
+            raise _ami_region_mismatch_error(
+                ami_id, ec2_client.meta.region_name
+            ) from e
+        raise
     images = resp.get("Images", [])
     if not images:
-        # Almost always an AMI/region mismatch (describe_images returns an
-        # empty list rather than erroring for a foreign-region AMI).
+        # Empty list (no error) for an AMI that exists but this account can't
+        # see — private/deregistered in the region. Same user-facing fix hint.
         raise _ami_region_mismatch_error(ami_id, ec2_client.meta.region_name)
     return images[0]["RootDeviceName"]
 
