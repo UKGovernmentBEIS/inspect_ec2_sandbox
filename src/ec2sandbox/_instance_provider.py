@@ -226,10 +226,7 @@ class DefaultEc2InstanceProvider:
     Used by the EC2 sandbox when no custom provider has been registered.
     Reads the infrastructure fields (``security_group_id``, ``subnet_id``,
     etc.) from the supplied :class:`Ec2SandboxEnvironmentConfig` at the
-    point they are needed. Region is never required in the config: each
-    method builds its client with ``region_name=config.region`` (an
-    explicit override, or ``None`` to let the session resolve it) and reads
-    the resolved region back off the client.
+    point they are needed.
     """
 
     # Process-global Ubuntu 24.04 AMI cache keyed on region. Canonical's
