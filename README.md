@@ -146,6 +146,12 @@ You can look at an existing [sample eval](src/ec2sandbox/examples/where_am_i.py)
 
 A more complex eval is [Sandbox Escape Bench](https://github.com/UKGovernmentBEIS/sandbox_escape_bench), where this EC2 sandbox is used as an outer sandbox and the agent is tasked with escaping an inner sandbox, generally Docker or Kubernetes.
 
+## Sandboxing limitations
+
+A sandbox is not a magic bullet for AI agent security. For more background, read AISI's [Inspect Sandboxing Toolkit](https://github.com/UKGovernmentBEIS/aisi-sandboxing).
+
+For the EC2 sandbox specifically, beware that the IAM role used by the sandbox EC2 instance (which is required by this provider for communication) can also be used by the agent.
+
 
 ## Tech Debt / Missing features
 
