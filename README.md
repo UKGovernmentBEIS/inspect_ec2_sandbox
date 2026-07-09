@@ -135,10 +135,7 @@ See [schema.py](src/ec2sandbox/schema.py) for details.
 
 ## Tech Debt / Missing features
 
-- task_cleanup is not implemented; only the default sample_cleanup is, so if you Ctrl-C a run, you have to clean up with the CLI command
 - Move long-running AWS commands to a separate thread to avoid blocking Inspect's TUI
-- Integration testing of all features
-- Add more sample evals
 - better logging/tracing
 
 
