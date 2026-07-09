@@ -185,9 +185,7 @@ def _root_device_name(ec2_client: Any, ami_id: str) -> str:
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code")
         if code in _AMI_NOT_FOUND_CODES:
-            raise _ami_region_mismatch_error(
-                ami_id, ec2_client.meta.region_name
-            ) from e
+            raise _ami_region_mismatch_error(ami_id, ec2_client.meta.region_name) from e
         raise
     images = resp.get("Images", [])
     if not images:
