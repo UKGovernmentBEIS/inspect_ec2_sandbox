@@ -65,9 +65,8 @@ class Ec2SandboxEnvironmentConfig(BaseModel):
     s3_key_prefix: str = ""
     volume_size: Optional[int] = None
 
-    # Optional explicit region override. None -> the boto3 session resolves
-    # the region (AWS_REGION / AWS_DEFAULT_REGION / ~/.aws/config) when it
-    # builds a client. A set value sits at the top of that chain.
+    # Optional explicit region override. None -> the boto3 session resolves the
+    # region when it builds a client (see README); a set value overrides that.
     region: Optional[str] = None
 
     # Direct-EC2-path fields — required when no Ec2InstanceProvider is
