@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 import boto3
-from botocore.exceptions import ClientError  # noqa: F401  (re-exported for convenience)
+from botocore.exceptions import ClientError
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 from ._unpack_tags import convert_tags_for_aws_interface
