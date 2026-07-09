@@ -7,17 +7,17 @@ as sandboxes, running within AWS EC2.
 
 ## Installing
 
-Add this using [Poetry](https://python-poetry.org/)
+Add this using [uv](https://github.com/astral-sh/uv)
+
+```
+uv add git+ssh://git@github.com/UKGovernmentBEIS/inspect_ec2_sandbox.git
+``` 
+or in [Poetry](https://python-poetry.org/),
 
 ```
 poetry add git+ssh://git@github.com/UKGovernmentBEIS/inspect_ec2_sandbox.git
 ```
 
-or in [uv](https://github.com/astral-sh/uv),
-
-```
-uv add git+ssh://git@github.com/UKGovernmentBEIS/inspect_ec2_sandbox.git
-```
 
 ## AWS Infrastructure
 
@@ -133,10 +133,25 @@ sandbox=SandboxEnvironmentSpec("ec2", Ec2SandboxEnvironmentConfig.from_settings(
 
 See [schema.py](src/ec2sandbox/schema.py) for details.
 
+## Compatibility with existing Inspect evals
+
+This sandbox provider is not [Dockerfile-compatible](https://inspect.aisi.org.uk/sandboxing.html#environment-binding).
+Hence, you will have to rebuild your evaluation envionment on top of an AWS virtual machine AMI.
+
+It is not a drop-in replacement; passing `--sandbox ec2` is unlikely to work for an existing eval.
+
+## Sample evaluation
+
+You can look at an existing [sample eval](src/ec2sandbox/examples/where_am_i.py) for how to get started.
+
+A more complex eval is [Sandbox Escape Bench](https://github.com/UKGovernmentBEIS/sandbox_escape_bench), where this EC2 sandbox is used as an outer sandbox and the agent is tasked with escaping an inner sandbox, generally Docker or Kubernetes.
+
+
 ## Tech Debt / Missing features
 
 - Move long-running AWS commands to a separate thread to avoid blocking Inspect's TUI
 - better logging/tracing
+- Dockerfile-compatibility
 
 
 ## Developing
