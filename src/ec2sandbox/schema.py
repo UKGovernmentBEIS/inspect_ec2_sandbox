@@ -5,7 +5,6 @@ This module provides configuration classes and utility functions for defining
  Inspect EC2 sandbox environments.
 """
 
-import os
 from typing import Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict
@@ -66,10 +65,13 @@ class Ec2SandboxEnvironmentConfig(BaseModel):
     s3_key_prefix: str = ""
     volume_size: Optional[int] = None
 
+    # Optional explicit region override. None -> the boto3 session resolves the
+    # region when it builds a client (see README); a set value overrides that.
+    region: Optional[str] = None
+
     # Direct-EC2-path fields — required when no Ec2InstanceProvider is
     # registered, ignored otherwise. ``sample_init`` validates these at
     # call time when the direct path is taken.
-    region: Optional[str] = None
     # TODO is vpc_id actually needed? We could just force a subnet ID.
     vpc_id: Optional[str] = None
     security_group_id: Optional[str] = None
@@ -101,16 +103,6 @@ class Ec2SandboxEnvironmentConfig(BaseModel):
 
         # Override with any provided kwargs
         params.update(kwargs)
-
-        region = params["region"]
-        if region is None:
-            region = os.getenv("AWS_REGION")
-        if not isinstance(region, str):
-            raise ValueError(
-                "Region must be specified either in settings,"
-                f" or as an environment variable {env_prefix}REGION or AWS_REGION."
-            )
-        params["region"] = region
 
         # AMI resolution is deferred to DefaultEc2InstanceProvider.create_instance
         # so that callers who only need terminate/find don't pay for an SSM

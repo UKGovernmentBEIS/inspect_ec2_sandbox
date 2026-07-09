@@ -83,7 +83,6 @@ and allow the end-user to specify the rest.
 The following environment variables must be set:
 
 ```bash
-INSPECT_EC2_SANDBOX_REGION=eu-west-1
 INSPECT_EC2_SANDBOX_VPC_ID=vpc-123456
 INSPECT_EC2_SANDBOX_SECURITY_GROUP_ID=sg-56781234
 INSPECT_EC2_SANDBOX_SUBNET_ID=subnet-654321
@@ -94,11 +93,23 @@ INSPECT_EC2_SANDBOX_S3_BUCKET=ec2sandboxstack-databucket123-456
 The following environment variables are optional:
 
 ```bash
+INSPECT_EC2_SANDBOX_REGION=eu-west-1
 INSPECT_EC2_SANDBOX_AMI_ID=ami-123456
 INSPECT_EC2_SANDBOX_INSTANCE_TYPE=t3a.small
 INSPECT_EC2_SANDBOX_S3_KEY_PREFIX=sandbox-comms
 INSPECT_EC2_SANDBOX_EXTRA_TAGS_STR='tagname1=tagvalue1;tagname2=tagvalue2'
 ```
+
+`INSPECT_EC2_SANDBOX_REGION` is only needed to override the region. When it is
+unset the region comes from [boto3's standard configuration chain][boto3-config],
+which raises an error if nothing is configured.
+
+> **Note:** boto3 resolves the region from `AWS_DEFAULT_REGION`, **not**
+> `AWS_REGION`. This differs from the AWS CLI and the JavaScript/Go/Java SDKs,
+> which read `AWS_REGION`. Export `AWS_DEFAULT_REGION` (or set
+> `INSPECT_EC2_SANDBOX_REGION`).
+
+[boto3-config]: https://docs.aws.amazon.com/boto3/latest/guide/configuration.html
 
 ### Configuration
 

@@ -15,12 +15,11 @@ sandbox is used.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 import boto3
-from botocore.exceptions import ClientError  # noqa: F401  (re-exported for convenience)
+from botocore.exceptions import ClientError
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 from ._unpack_tags import convert_tags_for_aws_interface
@@ -34,6 +33,23 @@ _logger = logging.getLogger(__name__)
 # Tag applied to every EC2 instance the sandbox provisions, so that the
 # default provider's ``find_sandbox_instances`` can discover them.
 MARKER_TAG_KEY = "inspect_sandbox"
+
+# EC2 error codes meaning "this AMI ID isn't in this region". Turned into a
+# clear ValueError so the common footgun — running an eval that hardcodes an
+# AMI in a different region from the one the session resolved — is legible.
+_AMI_NOT_FOUND_CODES = frozenset(
+    {"InvalidAMIID.NotFound", "InvalidAMIID.Malformed", "InvalidAMIID.Unavailable"}
+)
+
+
+def _ami_region_mismatch_error(ami_id: str, region: str) -> ValueError:
+    return ValueError(
+        f"AMI '{ami_id}' was not found in region '{region}'. AMI IDs are "
+        "region-scoped, so an eval that hardcodes ami_id only runs in that "
+        "AMI's region. Set INSPECT_EC2_SANDBOX_REGION (or the config's region) "
+        "to the AMI's region, or omit ami_id to auto-resolve the Ubuntu 24.04 "
+        "image for the resolved region."
+    )
 
 
 @dataclass(frozen=True)
@@ -164,10 +180,18 @@ def get_provider_session(
 
 def _root_device_name(ec2_client: Any, ami_id: str) -> str:
     """Return the root device name (e.g. ``/dev/sda1``) for ``ami_id``."""
-    resp = ec2_client.describe_images(ImageIds=[ami_id])
+    try:
+        resp = ec2_client.describe_images(ImageIds=[ami_id])
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code")
+        if code in _AMI_NOT_FOUND_CODES:
+            raise _ami_region_mismatch_error(ami_id, ec2_client.meta.region_name) from e
+        raise
     images = resp.get("Images", [])
     if not images:
-        raise ValueError(f"AMI {ami_id} not found when resolving root device name")
+        # Empty list (no error) for an AMI that exists but this account can't
+        # see — private/deregistered in the region. Same user-facing fix hint.
+        raise _ami_region_mismatch_error(ami_id, ec2_client.meta.region_name)
     return images[0]["RootDeviceName"]
 
 
@@ -206,12 +230,9 @@ class DefaultEc2InstanceProvider:
     """Default :class:`Ec2InstanceProvider` using direct boto3 calls.
 
     Used by the EC2 sandbox when no custom provider has been registered.
-    Reads the infrastructure fields (``region``, ``security_group_id``,
+    Reads the infrastructure fields (``security_group_id``, ``subnet_id``,
     etc.) from the supplied :class:`Ec2SandboxEnvironmentConfig` at the
-    point they are needed — ``create_instance`` requires the full set,
-    while ``terminate_instance`` and ``find_sandbox_instances`` only
-    need a region (the instance's own region for terminate; the
-    configured region for find).
+    point they are needed.
     """
 
     # Process-global Ubuntu 24.04 AMI cache keyed on region. Canonical's
@@ -249,7 +270,6 @@ class DefaultEc2InstanceProvider:
     ) -> ProvisionedInstance:
         cfg = self._config
         required = {
-            "region": cfg.region,
             "security_group_id": cfg.security_group_id,
             "subnet_id": cfg.subnet_id,
             "instance_profile": cfg.instance_profile,
@@ -264,11 +284,15 @@ class DefaultEc2InstanceProvider:
                 "register an Ec2InstanceProvider."
             )
 
-        if not ami_id:
-            assert cfg.region is not None  # validated above
-            ami_id = self._resolve_ubu24_ami(cfg.region)
-
+        # Read the resolved region back so the rest of the method (AMI lookup,
+        # SSM client, ProvisionedInstance) has a concrete value, not cfg.region
+        # which may be None.
         ec2_client = self._session.client("ec2", region_name=cfg.region)
+        region = ec2_client.meta.region_name
+
+        if not ami_id:
+            ami_id = self._resolve_ubu24_ami(region)
+
         instance_params: dict[str, Any] = {
             "ImageId": ami_id,
             "InstanceType": instance_type,
@@ -286,7 +310,15 @@ class DefaultEc2InstanceProvider:
                     "Ebs": {"VolumeSize": volume_size},
                 }
             ]
-        response = ec2_client.run_instances(**instance_params, MinCount=1, MaxCount=1)
+        try:
+            response = ec2_client.run_instances(
+                **instance_params, MinCount=1, MaxCount=1
+            )
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code")
+            if code in _AMI_NOT_FOUND_CODES:
+                raise _ami_region_mismatch_error(ami_id, region) from e
+            raise
         instance = response["Instances"][0]
         instance_id = instance["InstanceId"]
 
@@ -297,7 +329,7 @@ class DefaultEc2InstanceProvider:
             waiter = ec2_client.get_waiter("instance_running")
             waiter.wait(InstanceIds=[instance_id])
 
-            ssm_client = self._session.client("ssm", region_name=cfg.region)
+            ssm_client = self._session.client("ssm", region_name=region)
             _wait_for_ssm(instance_id, ssm_client)
         except BaseException:
             try:
@@ -310,11 +342,10 @@ class DefaultEc2InstanceProvider:
                 )
             raise
 
-        assert cfg.region is not None  # validated above
         assert cfg.s3_bucket is not None  # validated above
         return ProvisionedInstance(
             instance_id=instance_id,
-            region=cfg.region,
+            region=region,
             s3_bucket=cfg.s3_bucket,
             s3_key_prefix=cfg.s3_key_prefix,
         )
@@ -324,14 +355,11 @@ class DefaultEc2InstanceProvider:
         ec2.terminate_instances(InstanceIds=[instance_id])
 
     async def find_sandbox_instances(self) -> list[SandboxInstanceInfo]:
-        # cli_cleanup builds this provider with an empty config (no region),
-        # so fall back to AWS_REGION / AWS_DEFAULT_REGION as the session does.
-        region = (
-            self._config.region
-            or os.getenv("AWS_REGION")
-            or os.getenv("AWS_DEFAULT_REGION")
-        )
-        ec2 = self._session.client("ec2", region_name=region or None)
+        # cli_cleanup builds this provider with an empty config, so region is
+        # usually None here and the session resolves it. Read the resolved
+        # region back off the client to stamp on each SandboxInstanceInfo.
+        ec2 = self._session.client("ec2", region_name=self._config.region)
+        region = ec2.meta.region_name
         response = ec2.describe_instances(
             Filters=[
                 {"Name": f"tag:{MARKER_TAG_KEY}", "Values": ["true"]},
@@ -353,7 +381,7 @@ class DefaultEc2InstanceProvider:
                     SandboxInstanceInfo(
                         instance_id=instance["InstanceId"],
                         name=name,
-                        region=region or "",
+                        region=region,
                     )
                 )
         return results

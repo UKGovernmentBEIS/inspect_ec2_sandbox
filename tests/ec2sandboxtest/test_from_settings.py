@@ -36,23 +36,26 @@ def test_kwarg_overrides_env_var() -> None:
     assert config.instance_type == "t3a.xlarge"
 
 
-def test_region_falls_back_to_aws_region() -> None:
-    """AWS_REGION is used when INSPECT_EC2_SANDBOX_REGION is unset."""
+def test_explicit_region_env_var_sets_region() -> None:
+    """INSPECT_EC2_SANDBOX_REGION is carried through as an explicit override."""
+    with mock.patch.dict(os.environ, env_vars_all(), clear=True):
+        config = Ec2SandboxEnvironmentConfig.from_settings()
+    assert config.region == "eu-west-2"
+
+
+def test_region_left_none_for_session_to_resolve() -> None:
+    """Without INSPECT_EC2_SANDBOX_REGION, from_settings leaves region None.
+
+    Region resolution is deferred to the boto3 session at client-construction
+    time, so from_settings must not reimplement the chain by reading AWS_REGION
+    itself — that would shadow ~/.aws/config and the rest of botocore's chain.
+    """
     env_vars = env_vars_all()
     env_vars.pop("INSPECT_EC2_SANDBOX_REGION")
     env_vars["AWS_REGION"] = "eu-west-1"
     with mock.patch.dict(os.environ, env_vars, clear=True):
         config = Ec2SandboxEnvironmentConfig.from_settings()
-    assert config.region == "eu-west-1"
-
-
-def test_missing_region_raises_value_error() -> None:
-    """With no region from any source, from_settings raises a clear error."""
-    env_vars = env_vars_all()
-    env_vars.pop("INSPECT_EC2_SANDBOX_REGION")
-    with mock.patch.dict(os.environ, env_vars, clear=True):
-        with pytest.raises(ValueError, match="Region must be specified"):
-            Ec2SandboxEnvironmentConfig.from_settings()
+    assert config.region is None
 
 
 def test_s3_key_prefix_leading_slash_raises() -> None:
