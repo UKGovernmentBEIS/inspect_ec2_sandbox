@@ -3,11 +3,13 @@
 This folder contains a CDK project that allows you to deploy a basic VPC for 
 use by Inspect EC2 sandboxes.
 
+**WARNING**: This stack will result in ongoing AWS charges even when you have no sandboxes active: as of July 2026, around $60/month.
+
 ## Architecture
 
 It creates a VPC with three subnets, all in a single AZ.
 
-One of the subnets is completely isolated from the internet, the other is private with outgoing internet access.
+One of the subnets is completely isolated from the internet, the other is private with outgoing internet access. (The third is used only for the NAT gateway, not sandbox VMs.)
 
 It creates an S3 bucket which is needed for data communication with sandbox EC2 instances.
 
