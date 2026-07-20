@@ -17,7 +17,7 @@ dependencies = [
     "platformdirs>=4.3.7",
     "boto3>=1.35.0",
     "websocket-client>=1.8.0",
-    "pydantic-settings>=2.10.1",
+    "pydantic-settings>=2.14.2",
 ]
 
 [project.entry-points."inspect_ai"]
