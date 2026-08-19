@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- EC2 sandbox logs now appear in the `.eval` transcript at the default log level.
 - `AWS_REGION` ignored for boto compatibility; use `AWS_DEFAULT_REGION` or `INSPECT_EC2_SANDBOX_REGION`
 - custom `Ec2InstanceProvider` must drop the `region` parameter from `find_sandbox_instances()`.
 - `Ec2SandboxEnvironmentConfig.from_settings()` no longer accepts a `session` argument (use Ec2SandboxEnvironment.set_session()).

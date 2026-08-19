@@ -116,19 +116,20 @@ which raises an error if nothing is configured.
 As an alternative to the above environment variables you can specify the configuration directly in code, e.g
 
 ```python
-sandbox=SandboxEnvironmentSpec("ec2", Ec2SandboxEnvironmentConfig.from_settings(
-    region="eu-west-2",
-    vpc_id="vpc-123456",
-    security_group_id="sg-56781234",
-    s3_bucket="ec2sandboxstack-databucket123-456",
-    instance_profile="Ec2SandboxStack-SandboxInstanceProfile123-456",
-    ami_id="ami-123456",
-    subnet_id="subnet-654321",
-    instance_type="t3a.small",
-    extra_tags=(
-        ("foo", "bar"),
-    )
-)),
+sandbox = SandboxEnvironmentSpec(
+    "ec2",
+    Ec2SandboxEnvironmentConfig.from_settings(
+        region="eu-west-2",
+        vpc_id="vpc-123456",
+        security_group_id="sg-56781234",
+        s3_bucket="ec2sandboxstack-databucket123-456",
+        instance_profile="Ec2SandboxStack-SandboxInstanceProfile123-456",
+        ami_id="ami-123456",
+        subnet_id="subnet-654321",
+        instance_type="t3a.small",
+        extra_tags=(("foo", "bar"),),
+    ),
+)
 ```
 
 See [schema.py](src/ec2sandbox/schema.py) for details.
