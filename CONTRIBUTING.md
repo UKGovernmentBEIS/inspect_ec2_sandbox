@@ -68,3 +68,26 @@ manually:
 ```bash
 mypy
 ```
+
+## Releasing to PyPI
+
+Releases are published to PyPI via the [Publish to PyPI](.github/workflows/pypi.yml)
+workflow, which is triggered manually (`workflow_dispatch`) and uses PyPI's [trusted
+publisher](https://docs.pypi.org/trusted-publishers/) OIDC flow (no API token in the
+repository).
+
+To cut a release:
+
+1. Update `version` in `pyproject.toml` and add an entry to `CHANGELOG.md`.
+2. Open a PR, get it reviewed and merged.
+3. Tag the merge commit on `main` (`git tag v0.X.Y && git push --tags`) and create a
+   GitHub Release pointing at the tag.
+4. Run the **Publish to PyPI** workflow with `publish-release: false` first to push to
+   TestPyPI and sanity-check the artifact.
+5. Re-run the workflow with `publish-release: true` to push to PyPI.
+
+The workflow requires the `pypi` GitHub Environment to be configured on the repository
+and the trusted publisher to be registered for this project on
+[pypi.org](https://pypi.org/manage/account/publishing/) and
+[test.pypi.org](https://test.pypi.org/manage/account/publishing/). These are one-time
+maintainer setup steps.
