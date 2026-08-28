@@ -97,6 +97,13 @@ packages = ["ec2sandbox", "tests.ec2sandboxtest"]
 module = ["boto3", "boto3.*", "botocore", "botocore.*"]
 ignore_missing_imports = true
 
+# TEMPORARY: pins the dev environment to inspect_ai main for the portable sandbox
+# self-check suite, which is not yet in a PyPI release. Sources are stripped from
+# published metadata, so consumers of the wheel/sdist are unaffected. Remove this
+# and raise the `inspect_ai` floor once inspect publishes a release containing it.
+[tool.uv.sources]
+inspect-ai = { git = "https://github.com/UKGovernmentBEIS/inspect_ai", rev = "9fa31ccbccd0157bab73b1caa8b03c522470f83d" }
+
 [dependency-groups]
 dev = [
     "mypy>=1.14.1",
