@@ -423,13 +423,22 @@ class Ec2SandboxEnvironment(SandboxEnvironment):
             params,
         )
         # Send command using Session Manager with S3 output
-        response = self.ssm_client.send_command(
-            InstanceIds=[self.instance_id],
-            DocumentName="AWS-RunShellScript",
-            Parameters=params,
-            OutputS3BucketName=self.s3_bucket,
-            OutputS3KeyPrefix=s3_key_prefix,
-        )
+        try:
+            response = self.ssm_client.send_command(
+                InstanceIds=[self.instance_id],
+                DocumentName="AWS-RunShellScript",
+                Parameters=params,
+                OutputS3BucketName=self.s3_bucket,
+                OutputS3KeyPrefix=s3_key_prefix,
+            )
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") == "MaxDocumentSizeExceeded":
+                raise ValueError(
+                    "EC2 sandbox command exceeds the AWS SSM document-size limit. "
+                    "Reduce the command, input or environment, or use write_file() "
+                    "to stage large data and a short command to read it."
+                ) from error
+            raise
 
         command_id = response["Command"]["CommandId"]
         self.logger.debug("send_command returned command_id=%s", command_id)
