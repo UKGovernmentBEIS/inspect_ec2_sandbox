@@ -1,5 +1,9 @@
 # Inspect EC2 Sandbox
 
+> [!WARNING]
+> This package is deprecated and should not be used. It cannot be made secure; see
+> [Sandboxing limitations](#sandboxing-limitations).
+
 ## Purpose
 
 This plugin for [Inspect](https://inspect.aisi.org.uk/) allows you to use virtual machines
@@ -151,7 +155,7 @@ A more complex eval is [Sandbox Escape Bench](https://github.com/UKGovernmentBEI
 
 A sandbox is not a magic bullet for AI agent security. For more background, read AISI's [Inspect Sandboxing Toolkit](https://github.com/UKGovernmentBEIS/aisi-sandboxing).
 
-For the EC2 sandbox specifically, beware that the IAM role used by the sandbox EC2 instance (which is required by this provider for communication) can also be used by the agent.
+The package is deprecated because it cannot be made secure: the sandbox VM needs instance-profile credentials for the SSM channel this provider uses, and the agent can read those credentials from the instance metadata service and use them against AWS.
 
 
 ## Tech Debt / Missing features
